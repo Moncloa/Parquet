@@ -14,7 +14,7 @@ SERVICE=/etc/systemd/system/parquet.service
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y python3 python3-venv python3-pip ca-certificates git curl
+apt-get install -y python3 python3-venv python3-pip ca-certificates git curl tzdata
 
 if ! id parquet >/dev/null 2>&1; then
   useradd --system --home "$STATE_DIR" --shell /usr/sbin/nologin parquet

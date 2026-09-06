@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 
 from parquet.models import WatchItem
 from parquet.scheduler import ScheduledReview
@@ -45,53 +46,66 @@ class Storage:
     def __init__(self, path: Path) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path)
-        self.conn.executescript(SCHEMA)
-        self.conn.commit()
+        self._lock = RLock()
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        with self._lock:
+            self.conn.executescript(SCHEMA)
+            self.conn.commit()
 
     def get(self, key: str) -> str | None:
-        row = self.conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        with self._lock:
+            row = self.conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
         return None if row is None else str(row[0])
 
     def set(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT INTO kv(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO kv(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            )
+            self.conn.commit()
 
     def save_analysis(self, analysis_id: str, generated_at: str, payload: str) -> None:
-        self.conn.execute(
-            "INSERT OR IGNORE INTO analyses(analysis_id, generated_at, payload) VALUES(?, ?, ?)",
-            (analysis_id, generated_at, payload),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO analyses(analysis_id, generated_at, payload) "
+                "VALUES(?, ?, ?)",
+                (analysis_id, generated_at, payload),
+            )
+            self.conn.commit()
 
     def add_event(self, kind: str, payload: str) -> None:
-        self.conn.execute("INSERT INTO events(kind, payload) VALUES(?, ?)", (kind, payload))
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO events(kind, payload) VALUES(?, ?)",
+                (kind, payload),
+            )
+            self.conn.commit()
 
     def schedule_review(self, review: ScheduledReview) -> None:
         due_at = review.at.astimezone(UTC).isoformat()
-        self.conn.execute(
-            "INSERT OR REPLACE INTO scheduled_reviews(review_key, due_at, reason, source) "
-            "VALUES(?, ?, ?, ?)",
-            (review.key, due_at, review.reason, review.source),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO scheduled_reviews(review_key, due_at, reason, source) "
+                "VALUES(?, ?, ?, ?)",
+                (review.key, due_at, review.reason, review.source),
+            )
+            self.conn.commit()
 
     def delete_review(self, review: ScheduledReview) -> None:
-        self.conn.execute(
-            "DELETE FROM scheduled_reviews WHERE review_key = ?",
-            (review.key,),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM scheduled_reviews WHERE review_key = ?",
+                (review.key,),
+            )
+            self.conn.commit()
 
     def pending_reviews(self) -> list[ScheduledReview]:
-        rows = self.conn.execute(
-            "SELECT due_at, reason, source FROM scheduled_reviews ORDER BY due_at"
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT due_at, reason, source FROM scheduled_reviews ORDER BY due_at"
+            ).fetchall()
         return [
             ScheduledReview(
                 at=datetime.fromisoformat(str(row[0])),
@@ -102,32 +116,35 @@ class Storage:
         ]
 
     def save_watch(self, analysis_id: str, watch: WatchItem) -> None:
-        self.conn.execute(
-            "INSERT OR REPLACE INTO watches"
-            "(watch_id, analysis_id, symbol, expires_at, status, payload) "
-            "VALUES(?, ?, ?, ?, 'ACTIVE', ?)",
-            (
-                watch.watch_id,
-                analysis_id,
-                watch.symbol,
-                watch.expires_at.astimezone(UTC).isoformat(),
-                watch.model_dump_json(),
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO watches"
+                "(watch_id, analysis_id, symbol, expires_at, status, payload) "
+                "VALUES(?, ?, ?, ?, 'ACTIVE', ?)",
+                (
+                    watch.watch_id,
+                    analysis_id,
+                    watch.symbol,
+                    watch.expires_at.astimezone(UTC).isoformat(),
+                    watch.model_dump_json(),
+                ),
+            )
+            self.conn.commit()
 
     def active_watches(self, now: datetime | None = None) -> list[WatchItem]:
         current = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
-        rows = self.conn.execute(
-            "SELECT payload FROM watches WHERE status = 'ACTIVE' AND expires_at > ? "
-            "ORDER BY symbol, watch_id",
-            (current,),
-        ).fetchall()
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT payload FROM watches WHERE status = 'ACTIVE' AND expires_at > ? "
+                "ORDER BY symbol, watch_id",
+                (current,),
+            ).fetchall()
         return [WatchItem.model_validate_json(str(row[0])) for row in rows]
 
     def set_watch_status(self, watch_id: str, status: str) -> None:
-        self.conn.execute(
-            "UPDATE watches SET status = ? WHERE watch_id = ?",
-            (status, watch_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE watches SET status = ? WHERE watch_id = ?",
+                (status, watch_id),
+            )
+            self.conn.commit()

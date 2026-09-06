@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from threading import Thread
 
 from parquet.models import Bias, Trigger, TriggerType, WatchItem
 from parquet.scheduler import ScheduledReview
@@ -30,3 +31,21 @@ def test_active_watch_roundtrip(tmp_path) -> None:
     storage.save_watch("analysis-1", watch)
     restored = storage.active_watches()
     assert [item.watch_id for item in restored] == ["w-1"]
+
+
+def test_storage_can_be_used_from_worker_thread(tmp_path) -> None:
+    storage = Storage(tmp_path / "parquet.db")
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            storage.set("worker", "ok")
+        except Exception as exc:  # pragma: no cover - assertion captures it
+            errors.append(exc)
+
+    thread = Thread(target=worker)
+    thread.start()
+    thread.join()
+
+    assert errors == []
+    assert storage.get("worker") == "ok"
