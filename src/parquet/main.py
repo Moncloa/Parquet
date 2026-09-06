@@ -14,7 +14,8 @@ from parquet.orchestrator import Orchestrator
 
 def validate_keys(settings_path: Path | None) -> int:
     settings = load_settings(settings_path)
-    missing = [path for path in (settings.keys.private_key, settings.keys.public_key) if not path.exists()]
+    key_paths = (settings.keys.private_key, settings.keys.public_key)
+    missing = [path for path in key_paths if not path.exists()]
     if missing:
         print("Missing key files:")
         for path in missing:

@@ -51,7 +51,7 @@ class TradeProposal(BaseModel):
     risks: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_stop_direction(self) -> "TradeProposal":
+    def validate_stop_direction(self) -> TradeProposal:
         if self.stop_loss is None:
             return self
         if self.side == Side.BUY and self.stop_loss >= self.entry:

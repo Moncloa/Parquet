@@ -1,10 +1,10 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from parquet.bridge.github import ANALYSIS_MARKER, GitHubBridge
 
 
 def test_parse_analysis_comment() -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     body = f'''{ANALYSIS_MARKER}\n```json
 {{
   "schema_version": 1,

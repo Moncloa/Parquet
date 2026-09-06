@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
-
+import sqlite3
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -37,11 +36,18 @@ class Storage:
         return None if row is None else str(row[0])
 
     def set(self, key: str, value: str) -> None:
-        self.conn.execute("INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        self.conn.execute(
+            "INSERT INTO kv(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
         self.conn.commit()
 
     def save_analysis(self, analysis_id: str, generated_at: str, payload: str) -> None:
-        self.conn.execute("INSERT OR IGNORE INTO analyses(analysis_id, generated_at, payload) VALUES(?, ?, ?)", (analysis_id, generated_at, payload))
+        self.conn.execute(
+            "INSERT OR IGNORE INTO analyses(analysis_id, generated_at, payload) VALUES(?, ?, ?)",
+            (analysis_id, generated_at, payload),
+        )
         self.conn.commit()
 
     def add_event(self, kind: str, payload: str) -> None:

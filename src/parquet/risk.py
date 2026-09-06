@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from parquet.config import RiskConfig
 from parquet.models import RiskSnapshot, TradeProposal
@@ -17,14 +17,23 @@ class RiskEngine:
     def __init__(self, config: RiskConfig) -> None:
         self.config = config
 
-    def evaluate(self, proposal: TradeProposal, snapshot: RiskSnapshot, *, now: datetime | None = None) -> RiskDecision:
-        current = now or datetime.now(timezone.utc)
+    def evaluate(
+        self,
+        proposal: TradeProposal,
+        snapshot: RiskSnapshot,
+        *,
+        now: datetime | None = None,
+    ) -> RiskDecision:
+        current = now or datetime.now(UTC)
         reasons: list[str] = []
 
         if self.config.stop_loss_required and proposal.stop_loss is None:
             reasons.append("stop_loss_required")
         if proposal.expires_at <= current:
             reasons.append("signal_expired")
+        age_minutes = (current - proposal.expires_at).total_seconds() / 60
+        if age_minutes > self.config.max_signal_age_minutes:
+            reasons.append("signal_too_old")
         if snapshot.open_positions >= self.config.max_open_positions:
             reasons.append("max_open_positions")
         if snapshot.trades_today >= self.config.max_trades_per_day:

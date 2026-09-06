@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -19,7 +19,7 @@ class ReviewQueue:
         self._items[key] = review
 
     def due(self, now: datetime | None = None) -> list[ScheduledReview]:
-        current = now or datetime.now(timezone.utc)
+        current = now or datetime.now(UTC)
         due = [item for item in self._items.values() if item.at <= current]
         for item in due:
             self._items.pop(item.at.isoformat() + "|" + item.reason, None)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from parquet.bridge.github import GitHubBridge
@@ -65,7 +65,7 @@ class Orchestrator:
         for review in self.reviews.due():
             request = ReviewRequest(
                 request_id=str(uuid4()),
-                requested_at=datetime.now(timezone.utc),
+                requested_at=datetime.now(UTC),
                 reason=review.reason,
             )
             await self.bridge.post_review_request(request)
