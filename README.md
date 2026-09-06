@@ -2,7 +2,7 @@
 
 Parquet is an event-driven trading orchestrator designed to combine **ChatGPT market analysis** with a **deterministic local risk/execution layer**.
 
-> Current status: **V0.2 foundation / SHADOW only. No real broker order is sent by this code.**
+> Current status: **V0.3 foundation / SHADOW only. No real broker order is sent by this code.**
 
 ## Architecture
 
@@ -33,7 +33,7 @@ The design deliberately separates responsibilities:
 - The Watch Engine evaluates price/candle triggers locally without calling ChatGPT continuously.
 - Dynamic reviews and watch state persist in SQLite across restarts.
 - The deterministic risk engine can reject proposals independently of ChatGPT.
-- Broker execution is an adapter. V0.2 ships only a `ShadowExecutor`.
+- Broker execution is an adapter. V0.3 ships only a `ShadowExecutor`.
 - Stop-loss is mandatory by default.
 - Credentials never live in Git.
 
@@ -122,7 +122,7 @@ The full schema and prompt guidance live in [`docs/chatgpt-analysis-contract.md`
 - `demo`: reserved for eToro demo adapter.
 - `real`: reserved for Agent Portfolio production adapter.
 
-V0.2 intentionally implements **shadow only**.
+V0.3 intentionally implements **shadow only**.
 
 ## Development
 
@@ -160,8 +160,9 @@ mypy src
 - [x] Idempotent LXC installer
 - [x] CI: Ruff + strict mypy + pytest
 - [ ] Validate a private ChatGPT event round-trip
-- [ ] eToro market data adapter
-- [ ] Wire live market observations into Watch Engine
+- [x] Read-only eToro REST market-data adapter
+- [x] Wire market observations into Watch Engine
+- [ ] Add continuous eToro polling/WebSocket service
 - [ ] eToro demo execution + reconciliation
 - [ ] Position manager
 - [ ] Portfolio-level sizing/correlation rules

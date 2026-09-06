@@ -23,7 +23,7 @@ The GitHub bridge therefore ships disabled by default. Enable it only when the s
 
 ## Trading safety
 
-Real-money execution is not implemented in V0.2. Future broker adapters must preserve these invariants:
+Real-money execution is not implemented in V0.3. Future broker adapters must preserve these invariants:
 
 - stop-loss required for every new position;
 - deterministic risk checks cannot be bypassed by ChatGPT;

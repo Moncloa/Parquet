@@ -59,7 +59,7 @@ followed by one JSON object.
 
 ## Trigger vocabulary
 
-Only deterministic triggers are accepted in V0.2:
+Only deterministic triggers are accepted in V0.3:
 
 - `price_above`
 - `price_below`

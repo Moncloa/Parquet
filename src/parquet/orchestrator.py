@@ -7,15 +7,24 @@ from uuid import uuid4
 
 from parquet.bridge.github import GitHubBridge
 from parquet.config import Settings
-from parquet.models import MarketAnalysis, ReviewRequest
+from parquet.models import (
+    MarketAnalysis,
+    MarketObservation,
+    ReviewRequest,
+    TriggerAction,
+    WatchEvent,
+    WatchEventType,
+)
 from parquet.scheduler import ReviewQueue, ScheduledReview, ensure_structural_reviews
 from parquet.storage import Storage
+from parquet.watch import WatchEngine
 
 
 class Orchestrator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.storage = Storage(settings.state_db)
+        self.watch_engine = WatchEngine()
         self.reviews = ReviewQueue()
         for review in self.storage.pending_reviews():
             self.reviews.add(review)
@@ -63,6 +72,30 @@ class Orchestrator:
             )
         self.storage.set("latest_analysis_id", analysis.analysis_id)
 
+    def process_observation(self, observation: MarketObservation) -> list[WatchEvent]:
+        events: list[WatchEvent] = []
+        for watch in self.storage.active_watches(observation.observed_at):
+            event = self.watch_engine.evaluate(watch, observation)
+            if event is None:
+                continue
+            events.append(event)
+            self.storage.add_event("watch_event", event.model_dump_json())
+            self.storage.set_watch_status(watch.watch_id, event.event.value)
+            if event.event == WatchEventType.TRIGGERED and event.action == TriggerAction.REASSESS:
+                self.add_review(
+                    ScheduledReview(
+                        at=observation.observed_at.astimezone(UTC),
+                        reason=f"watch_trigger:{watch.watch_id}",
+                        source="watch",
+                    )
+                )
+            elif event.event == WatchEventType.TRIGGERED:
+                self.storage.add_event(
+                    "watch_execute_deferred",
+                    json.dumps({"watch_id": watch.watch_id, "reason": "execution_not_implemented"}),
+                )
+        return events
+
     async def poll_github_once(self) -> int:
         if self.bridge is None:
             return 0
@@ -83,13 +116,10 @@ class Orchestrator:
         return processed
 
     async def post_due_reviews(self, now: datetime | None = None) -> int:
+        if self.bridge is None:
+            return 0
         current = now or datetime.now(UTC)
         due = self.reviews.due(current)
-        if self.bridge is None:
-            for review in due:
-                self.storage.delete_review(review)
-            self.ensure_structural_reviews(current)
-            return 0
 
         active_symbols = sorted({watch.symbol for watch in self.storage.active_watches(current)})
         count = 0
