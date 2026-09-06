@@ -7,19 +7,31 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.1.0")
+    app = FastAPI(title="Parquet", version="0.2.0")
 
     @app.get("/health")
     def health() -> dict[str, object]:
-        return {"status": "ok", "mode": settings.mode, "github": settings.github.enabled}
+        return {
+            "status": "ok",
+            "mode": settings.mode,
+            "github": settings.github.enabled,
+        }
 
     @app.get("/status")
     def status() -> dict[str, object]:
+        active_watches = orchestrator.storage.active_watches()
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
+            "active_watches": len(active_watches),
+            "watch_symbols": sorted({watch.symbol for watch in active_watches}),
             "pending_reviews": [
-                {"at": r.at.isoformat(), "reason": r.reason} for r in orchestrator.reviews.pending()
+                {
+                    "at": review.at.isoformat(),
+                    "reason": review.reason,
+                    "source": review.source,
+                }
+                for review in orchestrator.reviews.pending()
             ],
         }
 

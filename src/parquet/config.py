@@ -32,8 +32,11 @@ class RiskConfig(BaseModel):
 
 class StructuralReview(BaseModel):
     name: str
+    timezone: str
     hour: int = Field(ge=0, le=23)
     minute: int = Field(ge=0, le=59)
+    offset_minutes: int = Field(default=1, ge=0, le=60)
+    weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
 
 
 class ScheduleConfig(BaseModel):

@@ -9,6 +9,7 @@ from parquet.models import Side, TradeProposal
 def test_buy_requires_stop_below_entry() -> None:
     with pytest.raises(ValidationError):
         TradeProposal(
+            proposal_id="p-1",
             symbol="NSDQ100",
             side=Side.BUY,
             entry=100,

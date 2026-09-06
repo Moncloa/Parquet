@@ -27,11 +27,17 @@ schedule:
   timezone: Europe/Madrid
   structural_reviews:
     - name: asia_open
-      hour: 1
-      minute: 1
-    - name: europe_open
+      timezone: Asia/Tokyo
       hour: 9
-      minute: 1
+      minute: 0
+      offset_minutes: 1
+    - name: europe_open
+      timezone: Europe/Berlin
+      hour: 9
+      minute: 0
+      offset_minutes: 1
     - name: wall_street_open
-      hour: 15
-      minute: 31
+      timezone: America/New_York
+      hour: 9
+      minute: 30
+      offset_minutes: 1

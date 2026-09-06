@@ -22,30 +22,39 @@ class TriggerAction(StrEnum):
     REASSESS = "REASSESS"
 
 
+class TriggerType(StrEnum):
+    PRICE_ABOVE = "price_above"
+    PRICE_BELOW = "price_below"
+    CLOSE_ABOVE = "close_above"
+    CLOSE_BELOW = "close_below"
+
+
 class Trigger(BaseModel):
-    type: str
-    price: float | None = None
+    type: TriggerType
+    price: float = Field(gt=0)
     timeframe: str | None = None
-    confirmation: str | None = None
 
 
 class WatchItem(BaseModel):
+    watch_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
     bias: Bias
     trigger: Trigger
-    invalidation: float | None = None
+    invalidation: float | None = Field(default=None, gt=0)
     expires_at: datetime
     on_trigger: TriggerAction = TriggerAction.REASSESS
     rationale: str | None = None
 
 
 class TradeProposal(BaseModel):
+    proposal_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
     side: Side
     entry: float = Field(gt=0)
     stop_loss: float | None = Field(default=None, gt=0)
     take_profit: float | None = Field(default=None, gt=0)
     confidence: float = Field(ge=0, le=1)
+    generated_at: datetime | None = None
     expires_at: datetime
     thesis: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
@@ -91,3 +100,27 @@ class RiskSnapshot(BaseModel):
     trades_today: int = 0
     daily_pnl_pct: float = 0.0
     weekly_pnl_pct: float = 0.0
+
+
+class MarketObservation(BaseModel):
+    symbol: str = Field(min_length=1)
+    price: float = Field(gt=0)
+    observed_at: datetime
+    timeframe: str | None = None
+    candle_closed: bool = False
+
+
+class WatchEventType(StrEnum):
+    TRIGGERED = "TRIGGERED"
+    INVALIDATED = "INVALIDATED"
+    EXPIRED = "EXPIRED"
+
+
+class WatchEvent(BaseModel):
+    watch_id: str
+    symbol: str
+    event: WatchEventType
+    observed_at: datetime
+    observed_price: float
+    action: TriggerAction | None = None
+    reason: str

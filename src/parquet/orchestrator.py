@@ -8,7 +8,7 @@ from uuid import uuid4
 from parquet.bridge.github import GitHubBridge
 from parquet.config import Settings
 from parquet.models import MarketAnalysis, ReviewRequest
-from parquet.scheduler import ReviewQueue, ScheduledReview
+from parquet.scheduler import ReviewQueue, ScheduledReview, ensure_structural_reviews
 from parquet.storage import Storage
 
 
@@ -17,6 +17,8 @@ class Orchestrator:
         self.settings = settings
         self.storage = Storage(settings.state_db)
         self.reviews = ReviewQueue()
+        for review in self.storage.pending_reviews():
+            self.reviews.add(review)
         self.bridge = (
             GitHubBridge(
                 settings.github.repository,
@@ -26,6 +28,22 @@ class Orchestrator:
             if settings.github.enabled
             else None
         )
+        self.ensure_structural_reviews()
+
+    def add_review(self, review: ScheduledReview) -> None:
+        self.reviews.add(review)
+        self.storage.schedule_review(review)
+
+    def ensure_structural_reviews(self, now: datetime | None = None) -> None:
+        before = {review.key for review in self.reviews.pending()}
+        ensure_structural_reviews(
+            self.reviews,
+            self.settings.schedule.structural_reviews,
+            now,
+        )
+        for review in self.reviews.pending():
+            if review.key not in before:
+                self.storage.schedule_review(review)
 
     def process_analysis(self, analysis: MarketAnalysis) -> None:
         self.storage.save_analysis(
@@ -33,9 +51,15 @@ class Orchestrator:
             analysis.generated_at.isoformat(),
             analysis.model_dump_json(),
         )
+        for watch in analysis.watch:
+            self.storage.save_watch(analysis.analysis_id, watch)
         if analysis.next_review is not None:
-            self.reviews.add(
-                ScheduledReview(at=analysis.next_review.at, reason=analysis.next_review.reason)
+            self.add_review(
+                ScheduledReview(
+                    at=analysis.next_review.at.astimezone(UTC),
+                    reason=analysis.next_review.reason,
+                    source="chatgpt",
+                )
             )
         self.storage.set("latest_analysis_id", analysis.analysis_id)
 
@@ -58,25 +82,36 @@ class Orchestrator:
         self.storage.set("github_last_comment_id", str(last_id))
         return processed
 
-    async def post_due_reviews(self) -> int:
+    async def post_due_reviews(self, now: datetime | None = None) -> int:
+        current = now or datetime.now(UTC)
+        due = self.reviews.due(current)
         if self.bridge is None:
+            for review in due:
+                self.storage.delete_review(review)
+            self.ensure_structural_reviews(current)
             return 0
+
+        active_symbols = sorted({watch.symbol for watch in self.storage.active_watches(current)})
         count = 0
-        for review in self.reviews.due():
+        for review in due:
             request = ReviewRequest(
                 request_id=str(uuid4()),
-                requested_at=datetime.now(UTC),
+                requested_at=current,
                 reason=review.reason,
+                symbols=active_symbols,
             )
             await self.bridge.post_review_request(request)
             self.storage.add_event("review_request", request.model_dump_json())
+            self.storage.delete_review(review)
             count += 1
+        self.ensure_structural_reviews(current)
         return count
 
     async def run_forever(self) -> None:
         while True:
             try:
                 await self.poll_github_once()
+                self.ensure_structural_reviews()
                 await self.post_due_reviews()
             except Exception as exc:
                 self.storage.add_event("orchestrator_error", json.dumps({"error": repr(exc)}))
