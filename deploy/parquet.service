@@ -1,0 +1,22 @@
+[Unit]
+Description=Parquet trading orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=parquet
+Group=parquet
+EnvironmentFile=-/etc/parquet/parquet.env
+ExecStart=/opt/parquet/venv/bin/parquet serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/parquet
+ReadOnlyPaths=/etc/parquet
+
+[Install]
+WantedBy=multi-user.target

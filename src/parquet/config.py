@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, Field
+
+
+class KeyConfig(BaseModel):
+    private_key: Path = Path("/etc/parquet/private_key.pem")
+    public_key: Path = Path("/etc/parquet/public_key.pem")
+
+
+class GitHubConfig(BaseModel):
+    enabled: bool = False
+    repository: str = "Moncloa/Parquet"
+    runtime_pr: int = 1
+    token_file: Path = Path("/etc/parquet/github_token")
+
+
+class RiskConfig(BaseModel):
+    stop_loss_required: bool = True
+    max_signal_age_minutes: int = 15
+    max_open_positions: int = 2
+    max_trades_per_day: int = 5
+    max_daily_loss_pct: float = 3.0
+    max_weekly_loss_pct: float = 6.0
+    max_risk_per_trade_pct: float = 1.0
+
+
+class StructuralReview(BaseModel):
+    name: str
+    hour: int = Field(ge=0, le=23)
+    minute: int = Field(ge=0, le=59)
+
+
+class ScheduleConfig(BaseModel):
+    timezone: str = "Europe/Madrid"
+    structural_reviews: list[StructuralReview] = Field(default_factory=list)
+
+
+class Settings(BaseModel):
+    mode: str = "shadow"
+    state_db: Path = Path("/var/lib/parquet/parquet.db")
+    host: str = "127.0.0.1"
+    port: int = 8787
+    poll_seconds: int = 20
+    keys: KeyConfig = Field(default_factory=KeyConfig)
+    github: GitHubConfig = Field(default_factory=GitHubConfig)
+    risk: RiskConfig = Field(default_factory=RiskConfig)
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
+
+
+def _deep_set(data: dict[str, Any], path: list[str], value: Any) -> None:
+    cursor = data
+    for key in path[:-1]:
+        cursor = cursor.setdefault(key, {})
+    cursor[path[-1]] = value
+
+
+def load_settings(path: Path | None = None) -> Settings:
+    config_path = path or Path(os.getenv("PARQUET_CONFIG", "/etc/parquet/parquet.yaml"))
+    raw: dict[str, Any] = {}
+    if config_path.exists():
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Config root must be a mapping: {config_path}")
+        raw = loaded
+
+    env_overrides = {
+        "PARQUET_PRIVATE_KEY": (["keys", "private_key"], str),
+        "PARQUET_PUBLIC_KEY": (["keys", "public_key"], str),
+        "PARQUET_GITHUB_TOKEN_FILE": (["github", "token_file"], str),
+    }
+    for env_name, (keys, cast) in env_overrides.items():
+        if env_name in os.environ:
+            _deep_set(raw, keys, cast(os.environ[env_name]))
+
+    return Settings.model_validate(raw)

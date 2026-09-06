@@ -1,0 +1,37 @@
+mode: shadow
+state_db: /var/lib/parquet/parquet.db
+host: 127.0.0.1
+port: 8787
+poll_seconds: 20
+
+keys:
+  private_key: /etc/parquet/private_key.pem
+  public_key: /etc/parquet/public_key.pem
+
+github:
+  enabled: false
+  repository: Moncloa/Parquet
+  runtime_pr: 1
+  token_file: /etc/parquet/github_token
+
+risk:
+  stop_loss_required: true
+  max_signal_age_minutes: 15
+  max_open_positions: 2
+  max_trades_per_day: 5
+  max_daily_loss_pct: 3.0
+  max_weekly_loss_pct: 6.0
+  max_risk_per_trade_pct: 1.0
+
+schedule:
+  timezone: Europe/Madrid
+  structural_reviews:
+    - name: asia_open
+      hour: 1
+      minute: 1
+    - name: europe_open
+      hour: 9
+      minute: 1
+    - name: wall_street_open
+      hour: 15
+      minute: 31
