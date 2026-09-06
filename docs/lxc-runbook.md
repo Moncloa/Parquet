@@ -90,7 +90,13 @@ Broker key files may be omitted for the first SHADOW deployment; the installer w
 
 ## 3. Install
 
-From the checkout:
+The installer must run as root. Minimal Debian LXCs commonly do not install `sudo`, so when the shell prompt is already `root@parquet`, run:
+
+```bash
+./install.sh
+```
+
+If working as a regular administrative user on a system that has `sudo`, the equivalent is:
 
 ```bash
 sudo ./install.sh
@@ -118,7 +124,13 @@ GIT_SSH_COMMAND='ssh -F /etc/parquet/ssh_config' \
 
 ## 5. Upgrade
 
-Run from the checkout:
+The update script also requires root. From a root shell in the checkout:
+
+```bash
+./scripts/update.sh
+```
+
+Or, from a regular administrative account where `sudo` is installed:
 
 ```bash
 sudo ./scripts/update.sh
