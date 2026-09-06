@@ -39,38 +39,44 @@ The design deliberately separates responsibilities:
 
 ## Reproducible host contract
 
-Host-provided files are kept outside the repository:
+Host-provided credentials are kept outside the repository:
 
 ```text
-/etc/parquet/private_key.pem
-/etc/parquet/public_key.pem
-/etc/parquet/github_token       # only required when private bridge is enabled
+/etc/parquet/github_deploy_key      # read-only clone/pull
+/etc/parquet/github_deploy_key.pub  # optional public half
+/etc/parquet/private_key.pem        # broker/auth material
+/etc/parquet/public_key.pem         # broker/auth material
+/etc/parquet/github_token           # only required when private runtime bridge is enabled
 ```
 
-The installer **never creates or overwrites the key pair**.
-
-Everything else is reproducible from the repository.
+The installer **never creates or overwrites private credentials**. It installs the pinned GitHub host key and SSH configuration, creates the service environment and preserves host configuration across upgrades.
 
 ## Install on a fresh Debian LXC
 
+Because `Moncloa/Parquet` is private, the first clone uses a repository-scoped **read-only GitHub deploy key**. See [`docs/lxc-runbook.md`](docs/lxc-runbook.md) for the complete bootstrap, including host-key fingerprint verification.
+
+Once cloned:
+
 ```bash
-git clone https://github.com/Moncloa/Parquet.git
 cd Parquet
-sudo mkdir -p /etc/parquet
-sudo cp /path/to/private_key.pem /etc/parquet/private_key.pem
-sudo cp /path/to/public_key.pem /etc/parquet/public_key.pem
 sudo ./install.sh
 ```
 
 Then:
 
 ```bash
-systemctl status parquet
-curl http://127.0.0.1:8787/health
-curl http://127.0.0.1:8787/status
+systemctl status parquet --no-pager
+curl -fsS http://127.0.0.1:8787/health
+curl -fsS http://127.0.0.1:8787/status
 ```
 
-See [`docs/lxc-runbook.md`](docs/lxc-runbook.md) for deployment acceptance criteria.
+Future updates are deliberately simple:
+
+```bash
+sudo ./scripts/update.sh
+```
+
+The update path uses `/etc/parquet/github_deploy_key` and only accepts fast-forward Git updates.
 
 ## Structural reviews
 
@@ -114,7 +120,7 @@ Parquet -> ChatGPT review requests use:
 
 The full schema and prompt guidance live in [`docs/chatgpt-analysis-contract.md`](docs/chatgpt-analysis-contract.md).
 
-**Security:** this repository is currently suitable for source code, but runtime trading messages must use a private channel. The GitHub bridge is disabled by default. See [`SECURITY.md`](SECURITY.md).
+**Security:** the source repository is private, but the runtime bridge remains disabled by default until token permissions and event behavior are validated in SHADOW mode. See [`SECURITY.md`](SECURITY.md).
 
 ## Modes
 
@@ -153,11 +159,13 @@ mypy src
 - [x] Structural market-opening scheduler with timezone/DST handling
 - [x] SQLite state/audit trail
 - [x] Persistent review/watch state
+- [x] Thread-safe SQLite access for API/worker use
 - [x] Deterministic Watch Engine
 - [x] Deterministic risk foundation
 - [x] Shadow execution adapter
 - [x] Health/status API
 - [x] Idempotent LXC installer
+- [x] Private-repository deploy-key update path
 - [x] CI: Ruff + strict mypy + pytest
 - [ ] Validate a private ChatGPT event round-trip
 - [x] Read-only eToro REST market-data adapter

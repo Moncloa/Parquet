@@ -11,10 +11,16 @@ ETC_DIR=/etc/parquet
 OPT_DIR=/opt/parquet
 STATE_DIR=/var/lib/parquet
 SERVICE=/etc/systemd/system/parquet.service
+GITHUB_DEPLOY_KEY="$ETC_DIR/github_deploy_key"
+GITHUB_DEPLOY_PUB="$ETC_DIR/github_deploy_key.pub"
+GITHUB_KNOWN_HOSTS="$ETC_DIR/github_known_hosts"
+GITHUB_SSH_CONFIG="$ETC_DIR/ssh_config"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y python3 python3-venv python3-pip ca-certificates git curl tzdata
+apt-get install -y \
+  python3 python3-venv python3-pip \
+  ca-certificates git curl openssh-client tzdata
 
 if ! id parquet >/dev/null 2>&1; then
   useradd --system --home "$STATE_DIR" --shell /usr/sbin/nologin parquet
@@ -24,8 +30,46 @@ install -d -m 0750 -o root -g parquet "$ETC_DIR"
 install -d -m 0750 -o parquet -g parquet "$STATE_DIR"
 install -d -m 0755 -o root -g root "$OPT_DIR"
 
+# Pin GitHub's published ED25519 host key from the repository. This file is public
+# material, not a secret. It prevents unattended updates from accepting an unknown host.
+install -m 0644 -o root -g root \
+  "$ROOT_DIR/deploy/github_known_hosts" "$GITHUB_KNOWN_HOSTS"
+
+cat > "$GITHUB_SSH_CONFIG" <<EOF
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile $GITHUB_DEPLOY_KEY
+  IdentitiesOnly yes
+  UserKnownHostsFile $GITHUB_KNOWN_HOSTS
+  StrictHostKeyChecking yes
+EOF
+chown root:root "$GITHUB_SSH_CONFIG"
+chmod 0644 "$GITHUB_SSH_CONFIG"
+
+if [[ -f "$GITHUB_DEPLOY_KEY" ]]; then
+  chown root:root "$GITHUB_DEPLOY_KEY"
+  chmod 0600 "$GITHUB_DEPLOY_KEY"
+  if ! ssh-keygen -y -f "$GITHUB_DEPLOY_KEY" >/dev/null 2>&1; then
+    echo "ERROR: $GITHUB_DEPLOY_KEY is not a readable SSH private key." >&2
+    exit 3
+  fi
+
+  if [[ -f "$GITHUB_DEPLOY_PUB" ]]; then
+    chown root:root "$GITHUB_DEPLOY_PUB"
+    chmod 0644 "$GITHUB_DEPLOY_PUB"
+  fi
+
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$ROOT_DIR" remote set-url origin git@github.com:Moncloa/Parquet.git
+  fi
+else
+  echo "WARNING: $GITHUB_DEPLOY_KEY is missing. Private-repository updates will not work."
+fi
+
 if [[ ! -f "$ETC_DIR/parquet.yaml" ]]; then
-  install -m 0640 -o root -g parquet "$ROOT_DIR/config/parquet.example.yaml" "$ETC_DIR/parquet.yaml"
+  install -m 0640 -o root -g parquet \
+    "$ROOT_DIR/config/parquet.example.yaml" "$ETC_DIR/parquet.yaml"
 fi
 
 if [[ ! -f "$ETC_DIR/parquet.env" ]]; then
@@ -47,6 +91,11 @@ for key in private_key.pem public_key.pem; do
     echo "WARNING: $ETC_DIR/$key is missing (required before broker integration is enabled)."
   fi
 done
+
+if [[ -f "$ETC_DIR/github_token" ]]; then
+  chown root:parquet "$ETC_DIR/github_token"
+  chmod 0640 "$ETC_DIR/github_token"
+fi
 
 python3 -m venv "$OPT_DIR/venv"
 "$OPT_DIR/venv/bin/pip" install --upgrade pip
