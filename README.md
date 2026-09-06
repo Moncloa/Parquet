@@ -55,12 +55,14 @@ The installer **never creates or overwrites private credentials**. It installs t
 
 Because `Moncloa/Parquet` is private, the first clone uses a repository-scoped **read-only GitHub deploy key**. See [`docs/lxc-runbook.md`](docs/lxc-runbook.md) for the complete bootstrap, including host-key fingerprint verification.
 
-Once cloned:
+Minimal Debian LXCs normally run the bootstrap from a root shell and may not have `sudo` installed. Once cloned:
 
 ```bash
 cd Parquet
-sudo ./install.sh
+./install.sh
 ```
+
+If using a regular administrative account on a system that has `sudo`, use `sudo ./install.sh` instead.
 
 Then:
 
@@ -70,10 +72,10 @@ curl -fsS http://127.0.0.1:8787/health
 curl -fsS http://127.0.0.1:8787/status
 ```
 
-Future updates are deliberately simple:
+Future updates from a root shell are deliberately simple:
 
 ```bash
-sudo ./scripts/update.sh
+./scripts/update.sh
 ```
 
 The update path uses `/etc/parquet/github_deploy_key` and only accepts fast-forward Git updates.
