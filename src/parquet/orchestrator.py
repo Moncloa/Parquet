@@ -215,7 +215,10 @@ class Orchestrator:
             self.storage.add_event("account_snapshot_error", json.dumps({"error": repr(exc)}))
             return 0
 
-        reverse_ids = {instrument_id: symbol for symbol, instrument_id in self._instrument_ids.items()}
+        reverse_ids = {
+            instrument_id: symbol
+            for symbol, instrument_id in self._instrument_ids.items()
+        }
         open_symbols = set(account.open_symbols)
         for instrument_id in account.open_instrument_ids:
             symbol = reverse_ids.get(instrument_id)
