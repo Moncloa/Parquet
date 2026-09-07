@@ -2,8 +2,27 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def _strict_output_schema_extra(schema: dict[str, Any]) -> None:
+    """Make one Pydantic model object compatible with OpenAI strict outputs."""
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+    schema["additionalProperties"] = False
+    schema["required"] = list(properties)
+    for property_schema in properties.values():
+        if isinstance(property_schema, dict) and property_schema.get("default", ...) is None:
+            property_schema.pop("default", None)
+
+
+class StrictOutputModel(BaseModel):
+    """Base class for models emitted through Codex structured output."""
+
+    model_config = ConfigDict(json_schema_extra=_strict_output_schema_extra)
 
 
 class Bias(StrEnum):
@@ -29,13 +48,13 @@ class TriggerType(StrEnum):
     CLOSE_BELOW = "close_below"
 
 
-class Trigger(BaseModel):
+class Trigger(StrictOutputModel):
     type: TriggerType
     price: float = Field(gt=0)
     timeframe: str | None = None
 
 
-class WatchItem(BaseModel):
+class WatchItem(StrictOutputModel):
     watch_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
     bias: Bias
@@ -47,7 +66,7 @@ class WatchItem(BaseModel):
     rationale: str | None = None
 
 
-class TradeProposal(BaseModel):
+class TradeProposal(StrictOutputModel):
     proposal_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
     side: Side
@@ -71,12 +90,12 @@ class TradeProposal(BaseModel):
         return self
 
 
-class NextReview(BaseModel):
+class NextReview(StrictOutputModel):
     at: datetime
     reason: str = Field(min_length=1)
 
 
-class MarketAnalysis(BaseModel):
+class MarketAnalysis(StrictOutputModel):
     schema_version: int = 1
     analysis_id: str = Field(min_length=1)
     review_request_id: str | None = Field(default=None, min_length=1)
