@@ -38,6 +38,48 @@ class EtoroOrderResult:
 
 
 @dataclass(frozen=True)
+class EtoroEligibilityResult:
+    request_id: str
+    instrument_id: int
+    symbol: str | None
+    min_position_exposure: float | None
+    allow_open_position: bool
+    leverage_configs: tuple[dict[str, Any], ...]
+    response: dict[str, Any]
+
+    def minimum_amount(self, *, direction: str, leverage: int = 1) -> float | None:
+        normalized_direction = direction.upper()
+        candidates: list[float] = []
+        if self.min_position_exposure is not None:
+            candidates.append(self.min_position_exposure)
+
+        matched_direction = False
+        leverage_supported = False
+        for config in self.leverage_configs:
+            if str(config.get("direction", "")).upper() != normalized_direction:
+                continue
+            matched_direction = True
+            values = config.get("leverageValues")
+            if isinstance(values, list) and leverage in {int(value) for value in values}:
+                leverage_supported = True
+                raw_minimum = config.get("minPositionAmount")
+                if raw_minimum is not None:
+                    candidates.append(float(raw_minimum))
+
+        if not matched_direction:
+            raise RuntimeError(
+                f"eToro eligibility has no {normalized_direction} configuration for instrument "
+                f"{self.instrument_id}"
+            )
+        if not leverage_supported:
+            raise RuntimeError(
+                f"eToro eligibility does not allow leverage x{leverage} for "
+                f"{normalized_direction} instrument {self.instrument_id}"
+            )
+        return max(candidates) if candidates else None
+
+
+@dataclass(frozen=True)
 class EtoroOrderLookupResult:
     request_id: str
     response: dict[str, Any]
@@ -187,6 +229,64 @@ class EtoroExecutionClient:
             real_cid=_optional_int(body.get("realCid")),
             demo_cid=_optional_int(body.get("demoCid")),
             scopes=frozenset(str(item) for item in scopes) if isinstance(scopes, list) else frozenset(),
+        )
+
+    async def instrument_eligibility(self, *, instrument_id: int) -> EtoroEligibilityResult:
+        request_id = str(uuid4())
+        payload = {
+            "instrumentIds": [instrument_id],
+            "currency": "USD",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
+                response = await client.post(
+                    f"{self.base_url}/trading/info/eligibility",
+                    headers=self._headers(request_id, json_body=True),
+                    json=payload,
+                )
+        except httpx.RequestError as exc:
+            raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
+        if response.is_error:
+            raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
+        body = _json_object(response, request_id, "eligibility")
+        raw_items = body.get("eligibilities")
+        if not isinstance(raw_items, list):
+            raise EtoroExecutionError(
+                response.status_code,
+                "eligibility response missing eligibilities",
+                request_id,
+            )
+        item = next(
+            (
+                candidate
+                for candidate in raw_items
+                if isinstance(candidate, dict)
+                and _optional_int(candidate.get("instrumentId")) == instrument_id
+            ),
+            None,
+        )
+        if item is None:
+            raise EtoroExecutionError(
+                response.status_code,
+                f"eligibility response missing instrument {instrument_id}",
+                request_id,
+            )
+        raw_configs = item.get("leverageConfigs")
+        configs = (
+            tuple(config for config in raw_configs if isinstance(config, dict))
+            if isinstance(raw_configs, list)
+            else ()
+        )
+        raw_minimum = item.get("minPositionExposure")
+        return EtoroEligibilityResult(
+            request_id=request_id,
+            instrument_id=instrument_id,
+            symbol=None if item.get("symbol") is None else str(item.get("symbol")),
+            min_position_exposure=(None if raw_minimum is None else float(raw_minimum)),
+            allow_open_position=bool(item.get("allowOpenPosition")),
+            leverage_configs=configs,
+            response=body,
         )
 
     async def open_market_order(

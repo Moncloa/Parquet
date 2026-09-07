@@ -9,7 +9,7 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.10.1")
+    app = FastAPI(title="Parquet", version="0.10.2")
 
     @app.get("/positions", response_class=HTMLResponse)
     def positions_page() -> HTMLResponse:
@@ -36,6 +36,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             and reconciliation_ready
             and not execution_uncertain
         )
+        legacy_live_test_real_enabled = (
+            settings.execution.live_test_enabled and settings.etoro.expected_gcid is None
+        )
         return {
             "status": "ok",
             "mode": settings.mode,
@@ -61,7 +64,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             ),
             "execution_uncertain": execution_uncertain,
             "broker_execution": broker_execution_ready,
-            "live_test_execution": settings.execution.live_test_enabled,
+            "live_test_execution": legacy_live_test_real_enabled,
+            "live_test_dry_run": settings.execution.live_test_enabled,
         }
 
     @app.get("/status")
@@ -82,6 +86,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             and identity_verified
             and reconciliation_ready
             and not execution_uncertain
+        )
+        legacy_live_test_real_enabled = (
+            settings.execution.live_test_enabled and settings.etoro.expected_gcid is None
         )
         return {
             "mode": settings.mode,
@@ -133,7 +140,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "broker_execution": broker_execution_ready,
             "execution_uncertain": execution_uncertain,
             "execution_attempts": [attempt.model_dump(mode="json") for attempt in attempts],
-            "live_test_execution": settings.execution.live_test_enabled,
+            "live_test_execution": legacy_live_test_real_enabled,
+            "live_test_dry_run": settings.execution.live_test_enabled,
             "live_test_max_amount_usd": settings.execution.live_test_max_amount_usd,
             "pending_reviews": [
                 {
