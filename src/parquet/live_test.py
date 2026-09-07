@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from parquet.config import Settings, load_settings
-from parquet.execution.etoro import EtoroExecutionClient
+from parquet.execution.etoro import EtoroExecutionClient, market_buy_payload
 from parquet.market.etoro import EtoroMarketDataClient
 
 CONFIRM_TEXT = "REAL-MONEY"
@@ -22,13 +22,17 @@ def _read_secret(path: Path, label: str) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Submit one deliberately small, manually confirmed eToro real-money test order."
+        description=(
+            "Validate or submit one deliberately small eToro live-test order. "
+            "Use --dry-run to stop before the execution POST."
+        )
     )
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--amount", required=True, type=float)
     parser.add_argument("--stop-loss", required=True, type=float)
     parser.add_argument("--take-profit", type=float)
-    parser.add_argument("--confirm", required=True)
+    parser.add_argument("--confirm", default="")
+    parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -40,12 +44,13 @@ async def run_live_test(
     stop_loss_rate: float,
     take_profit_rate: float | None,
     confirmation: str,
+    dry_run: bool = False,
 ) -> dict[str, object]:
     if not settings.etoro.enabled:
         raise RuntimeError("eToro is disabled")
     if not settings.execution.live_test_enabled:
         raise RuntimeError("execution.live_test_enabled is false")
-    if confirmation != CONFIRM_TEXT:
+    if not dry_run and confirmation != CONFIRM_TEXT:
         raise RuntimeError(f"confirmation must be exactly {CONFIRM_TEXT!r}")
     if amount_usd <= 0:
         raise RuntimeError("amount must be positive")
@@ -97,6 +102,32 @@ async def run_live_test(
             "live-test CLI requires zero open positions; use normal execution logic after bootstrap"
         )
 
+    payload = market_buy_payload(
+        instrument_id=exact.instrument_id,
+        amount_usd=amount_usd,
+        stop_loss_rate=stop_loss_rate,
+        take_profit_rate=take_profit_rate,
+    )
+    preflight: dict[str, object] = {
+        "dry_run": dry_run,
+        "symbol": normalized_symbol,
+        "instrument_id": exact.instrument_id,
+        "quote": {
+            "bid": rate.bid,
+            "ask": rate.ask,
+            "timestamp": rate.timestamp.isoformat(),
+            "age_seconds": round(quote_age, 3),
+        },
+        "payload": payload,
+        "before": {
+            "equity_usd": before.equity_usd,
+            "open_positions": before.open_positions,
+        },
+    }
+    if dry_run:
+        preflight["execution_post_sent"] = False
+        return preflight
+
     execution = EtoroExecutionClient(
         api_key=api_key,
         user_key=user_key,
@@ -111,26 +142,19 @@ async def run_live_test(
 
     await asyncio.sleep(2)
     after = await market.account_snapshot()
-    return {
-        "symbol": normalized_symbol,
-        "instrument_id": exact.instrument_id,
-        "quote": {
-            "bid": rate.bid,
-            "ask": rate.ask,
-            "timestamp": rate.timestamp.isoformat(),
-        },
-        "request_id": order.request_id,
-        "order_response": order.response,
-        "before": {
-            "equity_usd": before.equity_usd,
-            "open_positions": before.open_positions,
-        },
-        "after": {
-            "equity_usd": after.equity_usd,
-            "open_positions": after.open_positions,
-            "open_instrument_ids": after.open_instrument_ids,
-        },
-    }
+    preflight.update(
+        {
+            "execution_post_sent": True,
+            "request_id": order.request_id,
+            "order_response": order.response,
+            "after": {
+                "equity_usd": after.equity_usd,
+                "open_positions": after.open_positions,
+                "open_instrument_ids": after.open_instrument_ids,
+            },
+        }
+    )
+    return preflight
 
 
 async def _async_main() -> None:
@@ -142,6 +166,7 @@ async def _async_main() -> None:
         stop_loss_rate=args.stop_loss,
         take_profit_rate=args.take_profit,
         confirmation=args.confirm,
+        dry_run=args.dry_run,
     )
     print(json.dumps(result, indent=2))
 
