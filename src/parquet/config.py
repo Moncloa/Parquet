@@ -54,7 +54,7 @@ class EtoroConfig(BaseModel):
 class StrategyConfig(BaseModel):
     enabled: bool = False
     provider: str = "codex_cli"
-    queue_dir: Path = Path("/var/lib/parquet/strategy")
+    queue_dir: Path = Path("/var/lib/parquet-exchange")
 
     @model_validator(mode="after")
     def validate_strategy(self) -> StrategyConfig:
