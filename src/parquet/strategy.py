@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import time
 from dataclasses import dataclass
@@ -14,7 +15,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
+from parquet.bridge.github import GitHubBridge
 from parquet.models import MarketAnalysis, ReviewRequest, TriggerAction
+from parquet.storage import Storage
 
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
@@ -130,6 +133,146 @@ class StrategyQueue:
                 tmp.unlink()
             except FileNotFoundError:
                 pass
+
+
+class StrategyDispatcher:
+    """Moves sanitized review requests/results across the privilege boundary."""
+
+    def __init__(
+        self,
+        *,
+        queue_dir: Path,
+        state_db: Path,
+        storage: Storage,
+        bridge: GitHubBridge,
+        poll_seconds: float = 2.0,
+    ) -> None:
+        self.queue = StrategyQueue(queue_dir)
+        self.state_db = state_db
+        self.storage = storage
+        self.bridge = bridge
+        self.poll_seconds = poll_seconds
+
+    def poll_requests_once(self) -> int:
+        self.queue.ensure_dirs()
+        marker = self.storage.get("strategy_dispatch_last_event_id")
+        with sqlite3.connect(self.state_db) as conn:
+            if marker is None:
+                row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()
+                current_max = 0 if row is None else int(row[0])
+                self.storage.set("strategy_dispatch_last_event_id", str(current_max))
+                self.storage.add_event(
+                    "strategy_dispatch_cursor_initialized",
+                    json.dumps({"event_id": current_max}),
+                )
+                return 0
+            rows = conn.execute(
+                "SELECT id, payload FROM events "
+                "WHERE kind = 'review_request' AND id > ? ORDER BY id",
+                (int(marker),),
+            ).fetchall()
+
+        queued = 0
+        for event_id, payload in rows:
+            try:
+                request = ReviewRequest.model_validate_json(str(payload))
+                if self.queue.enqueue(request):
+                    queued += 1
+                    self.storage.add_event(
+                        "strategy_request_queued",
+                        json.dumps(
+                            {
+                                "request_id": request.request_id,
+                                "review_event_id": int(event_id),
+                            }
+                        ),
+                    )
+            except Exception as exc:
+                self.storage.set("strategy_last_error", _redact(str(exc))[:1000])
+                self.storage.set("strategy_last_error_at", datetime.now(UTC).isoformat())
+                self.storage.add_event(
+                    "strategy_dispatch_error",
+                    json.dumps(
+                        {
+                            "review_event_id": int(event_id),
+                            "error": _redact(str(exc))[:1000],
+                        }
+                    ),
+                )
+            finally:
+                self.storage.set("strategy_dispatch_last_event_id", str(int(event_id)))
+        return queued
+
+    async def poll_results_once(self) -> int:
+        consumed = 0
+        for path in self.queue.error_paths():
+            request_id = path.stem
+            try:
+                record = self.queue.read_error(path)
+                request_id = record.request_id
+                self.storage.set("strategy_last_error", record.error)
+                self.storage.set(
+                    "strategy_last_error_at", record.failed_at.astimezone(UTC).isoformat()
+                )
+                self.storage.add_event("strategy_analysis_error", record.model_dump_json())
+            except Exception as exc:
+                self.storage.set("strategy_last_error", _redact(str(exc))[:1000])
+                self.storage.set("strategy_last_error_at", datetime.now(UTC).isoformat())
+            self.queue.acknowledge(request_id)
+            consumed += 1
+
+        for path in self.queue.result_paths():
+            request_id = path.stem
+            request_path = self.queue.requests_dir / f"{request_id}.json"
+            try:
+                request = self.queue.read_request(request_path)
+                analysis = self.queue.read_result(path)
+                _validate_analysis_for_request(analysis, request)
+                await self.bridge.post_analysis(analysis)
+            except Exception as exc:
+                error = _redact(str(exc))[:1000]
+                self.storage.set("strategy_last_error", error)
+                self.storage.set("strategy_last_error_at", datetime.now(UTC).isoformat())
+                self.storage.add_event(
+                    "strategy_result_rejected",
+                    json.dumps({"request_id": request_id, "error": error}),
+                )
+                self.queue.acknowledge(request_id)
+                consumed += 1
+                continue
+
+            now = datetime.now(UTC).isoformat()
+            self.storage.set("strategy_last_success_at", now)
+            self.storage.set("strategy_last_analysis_id", analysis.analysis_id)
+            self.storage.set("strategy_last_error", "")
+            self.storage.add_event(
+                "strategy_analysis_published",
+                json.dumps(
+                    {
+                        "request_id": request_id,
+                        "analysis_id": analysis.analysis_id,
+                        "published_at": now,
+                    }
+                ),
+            )
+            self.queue.acknowledge(request_id)
+            consumed += 1
+        return consumed
+
+    async def run_forever(self) -> None:
+        self.queue.ensure_dirs()
+        while True:
+            try:
+                await self.poll_results_once()
+                self.poll_requests_once()
+            except Exception as exc:
+                error = _redact(str(exc))[:1000]
+                self.storage.set("strategy_last_error", error)
+                self.storage.set("strategy_last_error_at", datetime.now(UTC).isoformat())
+                self.storage.add_event(
+                    "strategy_dispatch_loop_error", json.dumps({"error": error})
+                )
+            await asyncio.sleep(self.poll_seconds)
 
 
 @dataclass(frozen=True)
