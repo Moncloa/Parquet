@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from parquet.bridge.github import GitHubBridge
 from parquet.models import MarketAnalysis, ReviewRequest
 from parquet.storage import Storage
 from parquet.strategy import (
