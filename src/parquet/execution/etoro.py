@@ -99,11 +99,22 @@ class EtoroCostResult:
     response: dict[str, Any]
 
     @property
+    def totals_by_currency(self) -> dict[str, float]:
+        totals: dict[str, float] = {}
+        for cost in self.costs:
+            currency = cost.currency.upper()
+            totals[currency] = totals.get(currency, 0.0) + cost.amount
+        return totals
+
+    @property
     def total_usd(self) -> float:
-        non_usd = [cost.currency for cost in self.costs if cost.currency.upper() != "USD"]
-        if non_usd:
-            raise RuntimeError(f"eToro what-if costs include non-USD currencies: {non_usd}")
-        return sum(cost.amount for cost in self.costs)
+        """Return only cost components already denominated in USD.
+
+        eToro may return financing components in an instrument-specific currency,
+        so non-USD values must remain separate until an explicit FX conversion is
+        performed by a higher layer.
+        """
+        return self.totals_by_currency.get("USD", 0.0)
 
 
 @dataclass(frozen=True)
@@ -381,10 +392,20 @@ class EtoroExecutionClient:
             )
         costs: list[EtoroCostComponent] = []
         for item in raw_costs:
+            if not isinstance(item, dict):
+                raise EtoroExecutionError(
+                    response.status_code,
+                    "invalid cost component",
+                    request_id,
+                )
+            raw_value = item.get("value")
+            if raw_value is None:
+                # Keep backward compatibility with the amount field used by
+                # earlier examples/mocks while preferring the real API shape.
+                raw_value = item.get("amount")
             if (
-                not isinstance(item, dict)
-                or item.get("costType") is None
-                or item.get("amount") is None
+                item.get("costType") is None
+                or raw_value is None
                 or item.get("currency") is None
             ):
                 raise EtoroExecutionError(
@@ -395,7 +416,7 @@ class EtoroExecutionClient:
             costs.append(
                 EtoroCostComponent(
                     cost_type=str(item["costType"]),
-                    amount=float(item["amount"]),
+                    amount=float(raw_value),
                     currency=str(item["currency"]),
                 )
             )
