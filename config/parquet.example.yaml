@@ -42,6 +42,13 @@ etoro:
   # Example: GOLD: 559 and OIL: 784 for the 24/7 instruments.
   instrument_ids: {}
 
+strategy:
+  # When true, Parquet dispatches new REVIEW_REQUEST events through the isolated
+  # parquet-strategy service. This does not enable broker execution.
+  enabled: false
+  provider: codex_cli
+  queue_dir: /var/lib/parquet-exchange
+
 execution:
   # Manual one-shot bootstrap path.
   live_test_enabled: false
