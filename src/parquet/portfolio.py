@@ -65,6 +65,16 @@ class ManagedPosition(BaseModel):
     side: str = Field(min_length=1)
     opened_at: datetime
     status: str = "OPEN"
+    amount_usd: float = 0.0
+    open_rate: float | None = None
+    leverage: float | None = None
+    stop_loss_rate: float | None = None
+    take_profit_rate: float | None = None
+    last_unrealized_pnl_usd: float = 0.0
+    last_seen_at: datetime | None = None
+    closed_at: datetime | None = None
+    realized_pnl_usd: float | None = None
+    pnl_estimated: bool = False
 
 
 class ManagedOrder(BaseModel):
@@ -149,11 +159,33 @@ class PositionManager:
                 )
             )
 
-        for broker_id in sorted(set(local_positions) - set(broker_positions)):
-            self.storage.set_managed_position_status(
-                local_positions[broker_id].local_id,
-                "CLOSED_AT_BROKER",
+        for broker_id in sorted(set(local_positions) & set(broker_positions)):
+            local = local_positions[broker_id]
+            broker = broker_positions[broker_id]
+            updated = local.model_copy(
+                update={
+                    "amount_usd": broker.amount_usd,
+                    "open_rate": broker.open_rate,
+                    "leverage": broker.leverage,
+                    "stop_loss_rate": broker.stop_loss_rate,
+                    "take_profit_rate": broker.take_profit_rate,
+                    "last_unrealized_pnl_usd": broker.unrealized_pnl_usd,
+                    "last_seen_at": snapshot.captured_at.astimezone(UTC),
+                }
             )
+            self.storage.save_managed_position(updated)
+
+        for broker_id in sorted(set(local_positions) - set(broker_positions)):
+            local = local_positions[broker_id]
+            closed = local.model_copy(
+                update={
+                    "status": "CLOSED_AT_BROKER",
+                    "closed_at": snapshot.captured_at.astimezone(UTC),
+                    "realized_pnl_usd": local.last_unrealized_pnl_usd,
+                    "pnl_estimated": True,
+                }
+            )
+            self.storage.save_managed_position(closed)
 
         for broker_id in sorted(set(local_orders) - set(broker_orders)):
             self.storage.set_managed_order_status(

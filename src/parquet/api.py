@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
 from parquet.config import Settings
+from parquet.dashboard import position_payload, render_positions_dashboard
 from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.8.0")
+    app = FastAPI(title="Parquet", version="0.9.0")
+
+    @app.get("/positions", response_class=HTMLResponse)
+    def positions_page() -> HTMLResponse:
+        return HTMLResponse(render_positions_dashboard(orchestrator.storage.managed_positions()))
+
+    @app.get("/positions.json")
+    def positions_data() -> dict[str, object]:
+        positions = orchestrator.storage.managed_positions()
+        return {
+            "open": [position_payload(item) for item in positions if item.status == "OPEN"],
+            "closed": [position_payload(item) for item in positions if item.status != "OPEN"],
+        }
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -20,6 +34,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "execution_gate": True,
             "position_manager": True,
             "reconciliation_engine": True,
+            "positions_dashboard": True,
             "reconciliation_state": None if reconciliation is None else reconciliation.state.value,
             "autonomous_trading_enabled": (
                 False if reconciliation is None else reconciliation.trading_enabled
@@ -42,6 +57,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         reconciliation = orchestrator.storage.get_reconciliation_report()
         broker_portfolio = orchestrator.storage.get_broker_portfolio_snapshot()
         attempts = orchestrator.storage.latest_execution_attempts()
+        positions = orchestrator.storage.managed_positions()
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
@@ -70,6 +86,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 else len(broker_portfolio.orders) + len(broker_portfolio.orders_for_open)
             ),
             "managed_positions": len(orchestrator.storage.active_managed_positions()),
+            "managed_closed_positions": len([item for item in positions if item.status != "OPEN"]),
             "managed_orders": len(orchestrator.storage.active_managed_orders()),
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,

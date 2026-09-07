@@ -242,6 +242,13 @@ class Storage:
             ).fetchall()
         return [ManagedPosition.model_validate_json(str(row[0])) for row in rows]
 
+    def managed_positions(self) -> list[ManagedPosition]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT payload FROM managed_positions ORDER BY rowid DESC"
+            ).fetchall()
+        return [ManagedPosition.model_validate_json(str(row[0])) for row in rows]
+
     def set_managed_position_status(self, local_id: str, status: str) -> None:
         with self._lock:
             row = self.conn.execute(
