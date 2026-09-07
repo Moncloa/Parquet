@@ -44,6 +44,9 @@ class GitHubBridge:
     async def post_review_request(self, request: ReviewRequest) -> None:
         await self._post(REQUEST_MARKER, request.model_dump_json(indent=2))
 
+    async def post_analysis(self, analysis: MarketAnalysis) -> None:
+        await self._post(ANALYSIS_MARKER, analysis.model_dump_json(indent=2))
+
     async def _post(self, marker: str, payload: str) -> None:
         url = f"https://api.github.com/repos/{self.repository}/issues/{self.pr_number}/comments"
         body = f"{marker}\n```json\n{payload}\n```"
