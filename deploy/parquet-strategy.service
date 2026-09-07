@@ -1,0 +1,29 @@
+[Unit]
+Description=Parquet isolated Codex strategy worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=parquet-strategy
+Group=parquet-strategy
+Environment=HOME=/var/lib/parquet-strategy
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-/etc/parquet-strategy/strategy.env
+WorkingDirectory=/var/lib/parquet-strategy/work
+ExecStart=/opt/parquet/venv/bin/parquet-strategy-worker
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/etc/parquet
+ReadWritePaths=/var/lib/parquet/strategy /var/lib/parquet-strategy
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
