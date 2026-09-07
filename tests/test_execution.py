@@ -34,6 +34,7 @@ def _observation(now: datetime, *, bid: float = 100.0, ask: float = 100.01) -> M
     return MarketObservation(
         symbol="GER40",
         price=bid,
+        instrument_id=32,
         bid=bid,
         ask=ask,
         observed_at=now,
@@ -71,6 +72,17 @@ def test_execution_gate_rejects_stale_risk_snapshot() -> None:
 def test_execution_gate_rejects_duplicate_symbol_position() -> None:
     now = datetime(2026, 9, 7, 10, 0, tzinfo=UTC)
     snapshot = _snapshot(now).model_copy(update={"open_symbols": ["GER40"]})
+    gate = ExecutionGate(RiskConfig(), EtoroConfig())
+
+    decision = gate.evaluate(_proposal(now), snapshot, _observation(now), now=now)
+
+    assert not decision.approved
+    assert "duplicate_symbol_position" in decision.reasons
+
+
+def test_execution_gate_rejects_duplicate_instrument_position() -> None:
+    now = datetime(2026, 9, 7, 10, 0, tzinfo=UTC)
+    snapshot = _snapshot(now).model_copy(update={"open_instrument_ids": [32]})
     gate = ExecutionGate(RiskConfig(), EtoroConfig())
 
     decision = gate.evaluate(_proposal(now), snapshot, _observation(now), now=now)
