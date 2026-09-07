@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from parquet.config import Settings
 from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
@@ -22,6 +23,8 @@ _FILLED_STATUS_IDS = {3, 5}
 _REJECTED_STATUS_IDS = {4}
 _PARTIAL_REJECT_STATUS_IDS = {10}
 _IN_FLIGHT_STATUS_IDS = {1, 2, 11, 12}
+_AMBIGUOUS_SUBMISSION_HTTP_STATUS_IDS = {200, 408, 409, 425, 429}
+_TRANSIENT_LOOKUP_HTTP_STATUS_IDS = {404, 408, 425, 429}
 
 
 class RealSmallExecutionAdapter:
@@ -57,8 +60,16 @@ class RealSmallExecutionAdapter:
         self.position_manager.assert_trading_enabled(now=current)
         await self._assert_agent_portfolio_identity()
 
-        submitting = self._save_state(attempt, ExecutionAttemptState.SUBMITTING, current)
-        submission_request_id: str | None = None
+        submission_request_id = str(uuid4())
+        submitting = attempt.model_copy(
+            update={
+                "state": ExecutionAttemptState.SUBMITTING,
+                "broker_request_id": submission_request_id,
+                "updated_at": current,
+            }
+        )
+        self.storage.save_execution_attempt(submitting)
+
         broker_order_id: str | None = None
         lookup: EtoroOrderLookupResult | None = None
 
@@ -69,19 +80,13 @@ class RealSmallExecutionAdapter:
                 amount_usd=submitting.amount_usd,
                 stop_loss_rate=submitting.stop_loss,
                 take_profit_rate=submitting.take_profit,
+                request_id=submission_request_id,
             )
-            submission_request_id = result.request_id
             broker_order_id = _extract_id(result.response, "orderId", "orderID", "order_id")
-            reference_id = _extract_id(result.response, "referenceId", "referenceID", "reference_id")
-            lookup = await self._lookup_until_settled(
-                order_id=broker_order_id,
-                reference_id=reference_id or result.request_id,
-            )
+            lookup = await self._lookup_until_settled(reference_id=submission_request_id)
         except EtoroExecutionTransportError as exc:
-            # Never retry the POST. A read-only lookup by the original X-Request-Id
-            # is safe and is the broker-supported recovery path for a lost response.
-            submission_request_id = exc.request_id
-            lookup = await self._lookup_until_settled(reference_id=exc.request_id)
+            # Never retry the POST. Read-only lookup by the durable request ID is safe.
+            lookup = await self._lookup_until_settled(reference_id=submission_request_id)
             if lookup is None:
                 return self._mark_unknown(
                     submitting,
@@ -91,12 +96,22 @@ class RealSmallExecutionAdapter:
                 )
             broker_order_id = lookup.order_id
         except EtoroExecutionError as exc:
-            return self._mark_rejected(
-                submitting,
-                datetime.now(UTC),
-                request_id=exc.request_id,
-                reason=str(exc),
-            )
+            if _is_definite_submission_rejection(exc.status_code):
+                return self._mark_rejected(
+                    submitting,
+                    datetime.now(UTC),
+                    request_id=submission_request_id,
+                    reason=str(exc),
+                )
+            lookup = await self._lookup_until_settled(reference_id=submission_request_id)
+            if lookup is None:
+                return self._mark_unknown(
+                    submitting,
+                    datetime.now(UTC),
+                    reason=f"ambiguous_http_error_after_submission:{exc.status_code}",
+                    request_id=submission_request_id,
+                )
+            broker_order_id = lookup.order_id
 
         if lookup is None:
             return self._mark_unknown(
@@ -104,7 +119,10 @@ class RealSmallExecutionAdapter:
                 datetime.now(UTC),
                 reason="broker_order_lookup_unresolved",
                 request_id=submission_request_id,
+                broker_order_id=broker_order_id,
             )
+
+        broker_order_id = broker_order_id or lookup.order_id
 
         if lookup.status_id in _REJECTED_STATUS_IDS:
             return self._mark_rejected(
@@ -112,7 +130,7 @@ class RealSmallExecutionAdapter:
                 datetime.now(UTC),
                 request_id=submission_request_id,
                 reason=_lookup_rejection_reason(lookup),
-                broker_order_id=broker_order_id or lookup.order_id,
+                broker_order_id=broker_order_id,
             )
 
         if lookup.status_id in _IN_FLIGHT_STATUS_IDS:
@@ -121,6 +139,7 @@ class RealSmallExecutionAdapter:
                 datetime.now(UTC),
                 reason=f"broker_order_still_in_flight:{lookup.status_name or lookup.status_id}",
                 request_id=submission_request_id,
+                broker_order_id=broker_order_id,
             )
 
         executed = lookup.status_id in _FILLED_STATUS_IDS
@@ -131,19 +150,24 @@ class RealSmallExecutionAdapter:
                 datetime.now(UTC),
                 reason=f"unknown_broker_order_status:{lookup.status_id}:{lookup.status_name}",
                 request_id=submission_request_id,
+                broker_order_id=broker_order_id,
             )
 
         position_ids = lookup.position_ids
         if len(position_ids) != 1:
-            reason = "filled_order_missing_position_id" if not position_ids else "multiple_positions_from_single_open_order"
+            reason = (
+                "filled_order_missing_position_id"
+                if not position_ids
+                else "multiple_positions_from_single_open_order"
+            )
             return self._mark_unknown(
                 submitting,
                 datetime.now(UTC),
                 reason=reason,
                 request_id=submission_request_id,
+                broker_order_id=broker_order_id,
             )
 
-        broker_order_id = broker_order_id or lookup.order_id
         if broker_order_id is None:
             return self._mark_unknown(
                 submitting,
@@ -155,7 +179,6 @@ class RealSmallExecutionAdapter:
         acknowledged = submitting.model_copy(
             update={
                 "state": ExecutionAttemptState.ACKNOWLEDGED,
-                "broker_request_id": submission_request_id,
                 "broker_order_id": broker_order_id,
                 "broker_position_id": position_ids[0],
                 "reason": _lookup_rejection_reason(lookup) if partial_rejected else None,
@@ -190,6 +213,7 @@ class RealSmallExecutionAdapter:
                 datetime.now(UTC),
                 reason="post_trade_reconciliation_not_synced",
                 request_id=submission_request_id,
+                broker_order_id=broker_order_id,
             )
 
         if not _broker_identity_visible(reconciling, snapshot):
@@ -198,6 +222,7 @@ class RealSmallExecutionAdapter:
                 datetime.now(UTC),
                 reason="filled_position_not_visible_after_reconciliation",
                 request_id=submission_request_id,
+                broker_order_id=broker_order_id,
             )
 
         reconciled = self._save_state(
@@ -237,7 +262,8 @@ class RealSmallExecutionAdapter:
         try:
             identity = await self.client.identity()
         except (EtoroExecutionError, EtoroExecutionTransportError) as exc:
-            raise RuntimeError(f"Real execution blocked: unable to validate eToro identity: {exc}") from exc
+            message = f"Real execution blocked: unable to validate eToro identity: {exc}"
+            raise RuntimeError(message) from exc
 
         if identity.gcid != expected_gcid:
             raise RuntimeError(
@@ -286,8 +312,7 @@ class RealSmallExecutionAdapter:
                 else:
                     last = await self.client.lookup_order(reference_id=reference_id)
             except EtoroExecutionError as exc:
-                # Newly accepted orders can take a moment to become visible to lookup.
-                if exc.status_code != 404:
+                if not _is_transient_lookup_error(exc.status_code):
                     return None
             except EtoroExecutionTransportError:
                 # Read-only status queries are safe to retry; the write is never retried.
@@ -342,12 +367,14 @@ class RealSmallExecutionAdapter:
         *,
         reason: str,
         request_id: str | None,
+        broker_order_id: str | None = None,
     ) -> ExecutionAttempt:
         unknown = attempt.model_copy(
             update={
                 "state": ExecutionAttemptState.OUTCOME_UNKNOWN,
                 "reason": reason,
                 "broker_request_id": request_id,
+                "broker_order_id": broker_order_id or attempt.broker_order_id,
                 "updated_at": now,
             }
         )
@@ -400,6 +427,16 @@ def _lookup_rejection_reason(lookup: EtoroOrderLookupResult) -> str:
     if lookup.error_message:
         parts.append(lookup.error_message)
     return ": ".join(parts)
+
+
+def _is_definite_submission_rejection(status_code: int) -> bool:
+    if status_code in _AMBIGUOUS_SUBMISSION_HTTP_STATUS_IDS:
+        return False
+    return 400 <= status_code < 500
+
+
+def _is_transient_lookup_error(status_code: int) -> bool:
+    return status_code in _TRANSIENT_LOOKUP_HTTP_STATUS_IDS or status_code >= 500
 
 
 def _broker_identity_visible(attempt: ExecutionAttempt, snapshot: Any) -> bool:
