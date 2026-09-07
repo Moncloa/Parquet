@@ -7,7 +7,12 @@ import pytest
 
 from parquet.config import EtoroConfig, ExecutionConfig, Settings
 from parquet.execution.autonomous import ExecutionAttemptState
-from parquet.execution.etoro import EtoroEligibilityResult, EtoroExecutionClient
+from parquet.execution.etoro import (
+    EtoroCostComponent,
+    EtoroCostResult,
+    EtoroEligibilityResult,
+    EtoroExecutionClient,
+)
 from parquet.live_test import run_live_test
 from parquet.market.etoro import InstrumentRate, InstrumentSearchHit
 from parquet.models import Side, TradeProposal
@@ -56,7 +61,7 @@ def test_choose_real_small_amount_rejects_broker_minimum_above_cap() -> None:
 def test_eligibility_requires_direction_and_leverage() -> None:
     eligibility = _eligibility(minimum=10.0)
     assert eligibility.minimum_amount(direction="LONG", leverage=1) == 10.0
-    with pytest.raises(RuntimeError, match="no SHORT configuration"):
+    with pytest.raises(RuntimeError, match="SHORT instrument"):
         eligibility.minimum_amount(direction="SHORT", leverage=1)
 
 
@@ -184,6 +189,19 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
             assert instrument_id == 100
             return _eligibility(minimum=10.0)
 
+        async def what_if_open_costs(self, **kwargs):
+            assert kwargs["instrument_id"] == 100
+            assert kwargs["settlement_type"] == "CFD"
+            assert kwargs["amount_usd"] == 10.0
+            return EtoroCostResult(
+                request_id="cost-1",
+                instrument_id=100,
+                symbol="TEST",
+                costs=(EtoroCostComponent("marketSpread", 0.05, "USD"),),
+                last_updated=datetime.now(UTC),
+                response={},
+            )
+
     monkeypatch.setattr("parquet.orchestrator.EtoroMarketDataClient", FakeMarketClient)
     monkeypatch.setattr("parquet.tickets.EtoroExecutionClient", FakeExecutionClient)
 
@@ -217,4 +235,6 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
     assert ticket.attempt.amount_usd == 10.0
     assert ticket.broker_minimum_usd == 10.0
     assert ticket.maximum_safe_amount_usd == 25.0
+    assert ticket.settlement_type == "CFD"
+    assert ticket.costs.total_usd == pytest.approx(0.05)
     assert ticket.attempt.broker_request_id is None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -47,36 +48,62 @@ class EtoroEligibilityResult:
     leverage_configs: tuple[dict[str, Any], ...]
     response: dict[str, Any]
 
-    def minimum_amount(self, *, direction: str, leverage: int = 1) -> float | None:
+    def matching_config(self, *, direction: str, leverage: int = 1) -> dict[str, Any]:
         normalized_direction = direction.upper()
-        candidates: list[float] = []
-        if self.min_position_exposure is not None:
-            candidates.append(self.min_position_exposure)
-
-        matched_direction = False
-        leverage_supported = False
         for config in self.leverage_configs:
             if str(config.get("direction", "")).upper() != normalized_direction:
                 continue
-            matched_direction = True
             values = config.get("leverageValues")
             if isinstance(values, list) and leverage in {int(value) for value in values}:
-                leverage_supported = True
-                raw_minimum = config.get("minPositionAmount")
-                if raw_minimum is not None:
-                    candidates.append(float(raw_minimum))
+                return config
+        raise RuntimeError(
+            f"eToro eligibility does not allow leverage x{leverage} for "
+            f"{normalized_direction} instrument {self.instrument_id}"
+        )
 
-        if not matched_direction:
-            raise RuntimeError(
-                f"eToro eligibility has no {normalized_direction} configuration for instrument "
-                f"{self.instrument_id}"
-            )
-        if not leverage_supported:
-            raise RuntimeError(
-                f"eToro eligibility does not allow leverage x{leverage} for "
-                f"{normalized_direction} instrument {self.instrument_id}"
-            )
+    def minimum_amount(self, *, direction: str, leverage: int = 1) -> float | None:
+        candidates: list[float] = []
+        if self.min_position_exposure is not None:
+            candidates.append(self.min_position_exposure)
+        config = self.matching_config(direction=direction, leverage=leverage)
+        raw_minimum = config.get("minPositionAmount")
+        if raw_minimum is not None:
+            candidates.append(float(raw_minimum))
         return max(candidates) if candidates else None
+
+    def settlement_type(self, *, direction: str, leverage: int = 1) -> str:
+        config = self.matching_config(direction=direction, leverage=leverage)
+        raw = config.get("settlementType")
+        if raw is None or not str(raw).strip():
+            raise RuntimeError(
+                f"eToro eligibility omitted settlementType for {direction.upper()} "
+                f"instrument {self.instrument_id} leverage x{leverage}"
+            )
+        return str(raw)
+
+
+@dataclass(frozen=True)
+class EtoroCostComponent:
+    cost_type: str
+    amount: float
+    currency: str
+
+
+@dataclass(frozen=True)
+class EtoroCostResult:
+    request_id: str
+    instrument_id: int
+    symbol: str | None
+    costs: tuple[EtoroCostComponent, ...]
+    last_updated: datetime
+    response: dict[str, Any]
+
+    @property
+    def total_usd(self) -> float:
+        non_usd = [cost.currency for cost in self.costs if cost.currency.upper() != "USD"]
+        if non_usd:
+            raise RuntimeError(f"eToro what-if costs include non-USD currencies: {non_usd}")
+        return sum(cost.amount for cost in self.costs)
 
 
 @dataclass(frozen=True)
@@ -142,6 +169,7 @@ def market_order_payload(
     amount_usd: float,
     stop_loss_rate: float,
     take_profit_rate: float | None = None,
+    settlement_type: str | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_open_transaction(transaction)
     payload: dict[str, Any] = {
@@ -155,6 +183,8 @@ def market_order_payload(
         "stopLossRate": stop_loss_rate,
         "stopLossType": "fixed",
     }
+    if settlement_type is not None:
+        payload["settlementType"] = settlement_type
     if take_profit_rate is not None:
         payload["takeProfitRate"] = take_profit_rate
     return payload
@@ -166,6 +196,7 @@ def market_buy_payload(
     amount_usd: float,
     stop_loss_rate: float,
     take_profit_rate: float | None = None,
+    settlement_type: str | None = None,
 ) -> dict[str, Any]:
     return market_order_payload(
         transaction="buy",
@@ -173,6 +204,7 @@ def market_buy_payload(
         amount_usd=amount_usd,
         stop_loss_rate=stop_loss_rate,
         take_profit_rate=take_profit_rate,
+        settlement_type=settlement_type,
     )
 
 
@@ -228,7 +260,11 @@ class EtoroExecutionClient:
             gcid=int(raw_gcid),
             real_cid=_optional_int(body.get("realCid")),
             demo_cid=_optional_int(body.get("demoCid")),
-            scopes=frozenset(str(item) for item in scopes) if isinstance(scopes, list) else frozenset(),
+            scopes=(
+                frozenset(str(item) for item in scopes)
+                if isinstance(scopes, list)
+                else frozenset()
+            ),
         )
 
     async def instrument_eligibility(self, *, instrument_id: int) -> EtoroEligibilityResult:
@@ -289,6 +325,96 @@ class EtoroExecutionClient:
             response=body,
         )
 
+    async def what_if_open_costs(
+        self,
+        *,
+        transaction: str,
+        instrument_id: int,
+        settlement_type: str,
+        amount_usd: float,
+        stop_loss_rate: float | None = None,
+        take_profit_rate: float | None = None,
+        leverage: int = 1,
+    ) -> EtoroCostResult:
+        request_id = str(uuid4())
+        payload: dict[str, Any] = {
+            "action": "open",
+            "transaction": _normalize_open_transaction(transaction),
+            "instrumentId": instrument_id,
+            "settlementType": settlement_type,
+            "orderType": "mkt",
+            "leverage": leverage,
+            "amount": amount_usd,
+            "orderCurrency": "usd",
+        }
+        if stop_loss_rate is not None:
+            payload["stopLossRate"] = stop_loss_rate
+            payload["stopLossType"] = "fixed"
+        if take_profit_rate is not None:
+            payload["takeProfitRate"] = take_profit_rate
+
+        try:
+            async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
+                response = await client.post(
+                    f"{self.base_url}/trading/info/costs",
+                    headers=self._headers(request_id, json_body=True),
+                    json=payload,
+                )
+        except httpx.RequestError as exc:
+            raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
+        if response.is_error:
+            raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
+        body = _json_object(response, request_id, "cost")
+        if _optional_int(body.get("instrumentId")) != instrument_id:
+            raise EtoroExecutionError(
+                response.status_code,
+                "cost response instrument mismatch",
+                request_id,
+            )
+        raw_costs = body.get("costs")
+        if not isinstance(raw_costs, list):
+            raise EtoroExecutionError(
+                response.status_code,
+                "cost response missing costs",
+                request_id,
+            )
+        costs: list[EtoroCostComponent] = []
+        for item in raw_costs:
+            if (
+                not isinstance(item, dict)
+                or item.get("costType") is None
+                or item.get("amount") is None
+                or item.get("currency") is None
+            ):
+                raise EtoroExecutionError(
+                    response.status_code,
+                    "invalid cost component",
+                    request_id,
+                )
+            costs.append(
+                EtoroCostComponent(
+                    cost_type=str(item["costType"]),
+                    amount=float(item["amount"]),
+                    currency=str(item["currency"]),
+                )
+            )
+        raw_updated = body.get("lastUpdated")
+        if raw_updated is None:
+            raise EtoroExecutionError(
+                response.status_code,
+                "cost response missing lastUpdated",
+                request_id,
+            )
+        return EtoroCostResult(
+            request_id=request_id,
+            instrument_id=instrument_id,
+            symbol=None if body.get("symbol") is None else str(body.get("symbol")),
+            costs=tuple(costs),
+            last_updated=datetime.fromisoformat(str(raw_updated).replace("Z", "+00:00")),
+            response=body,
+        )
+
     async def open_market_order(
         self,
         *,
@@ -298,6 +424,7 @@ class EtoroExecutionClient:
         stop_loss_rate: float,
         take_profit_rate: float | None = None,
         request_id: str | None = None,
+        settlement_type: str | None = None,
     ) -> EtoroOrderResult:
         submission_request_id = request_id or str(uuid4())
         payload = market_order_payload(
@@ -306,6 +433,7 @@ class EtoroExecutionClient:
             amount_usd=amount_usd,
             stop_loss_rate=stop_loss_rate,
             take_profit_rate=take_profit_rate,
+            settlement_type=settlement_type,
         )
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
@@ -369,6 +497,7 @@ class EtoroExecutionClient:
         stop_loss_rate: float,
         take_profit_rate: float | None = None,
         request_id: str | None = None,
+        settlement_type: str | None = None,
     ) -> EtoroOrderResult:
         return await self.open_market_order(
             transaction="buy",
@@ -377,6 +506,7 @@ class EtoroExecutionClient:
             stop_loss_rate=stop_loss_rate,
             take_profit_rate=take_profit_rate,
             request_id=request_id,
+            settlement_type=settlement_type,
         )
 
 

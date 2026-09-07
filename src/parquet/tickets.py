@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from parquet.autonomous_orchestrator import AutonomousOrchestrator
 from parquet.config import Settings
 from parquet.execution.autonomous import ExecutionAttempt
-from parquet.execution.etoro import EtoroEligibilityResult, EtoroExecutionClient
+from parquet.execution.etoro import EtoroCostResult, EtoroEligibilityResult, EtoroExecutionClient
 from parquet.execution.gate import ExecutionDecision
 from parquet.market.etoro import EtoroMarketDataClient, InstrumentRate
 from parquet.models import MarketObservation, Side, TradeProposal
@@ -28,6 +28,8 @@ class PreparedRealSmallTicket:
     observation: MarketObservation
     gate_decision: ExecutionDecision
     eligibility: EtoroEligibilityResult
+    costs: EtoroCostResult
+    settlement_type: str
     broker_minimum_usd: float | None
     maximum_safe_amount_usd: float
 
@@ -90,6 +92,32 @@ def choose_real_small_amount(
     return chosen_amount, maximum_safe
 
 
+def validate_what_if_costs(
+    costs: EtoroCostResult,
+    *,
+    instrument_id: int,
+    amount_usd: float,
+    now: datetime,
+    max_age: timedelta = timedelta(minutes=2),
+) -> None:
+    if costs.instrument_id != instrument_id:
+        raise RuntimeError("eToro what-if cost response does not match the ticket instrument")
+    updated = costs.last_updated.astimezone(UTC)
+    age = now - updated
+    if age < timedelta(seconds=-5) or age > max_age:
+        raise RuntimeError(
+            f"eToro what-if costs are stale or future-dated: age={age.total_seconds():.1f}s"
+        )
+    total = costs.total_usd
+    if total < 0:
+        raise RuntimeError("eToro what-if cost total is negative")
+    if total >= amount_usd:
+        raise RuntimeError(
+            f"eToro what-if costs {total:.2f} USD consume the full "
+            f"{amount_usd:.2f} USD ticket"
+        )
+
+
 async def prepare_real_small_ticket(
     settings: Settings,
     *,
@@ -147,11 +175,28 @@ async def prepare_real_small_ticket(
 
     direction = "LONG" if proposal.side == Side.BUY else "SHORT"
     broker_minimum = eligibility.minimum_amount(direction=direction, leverage=1)
+    settlement_type = eligibility.settlement_type(direction=direction, leverage=1)
     chosen_amount, maximum_safe = choose_real_small_amount(
         gate_maximum_usd=decision.amount_usd,
         supervised_cap_usd=settings.execution.supervised_real_max_amount_usd,
         broker_minimum_usd=broker_minimum,
         requested_amount_usd=requested_amount_usd,
+    )
+
+    costs = await execution_client.what_if_open_costs(
+        transaction="buy" if proposal.side == Side.BUY else "sellShort",
+        instrument_id=instrument_id,
+        settlement_type=settlement_type,
+        amount_usd=chosen_amount,
+        stop_loss_rate=proposal.stop_loss,
+        take_profit_rate=proposal.take_profit,
+        leverage=1,
+    )
+    validate_what_if_costs(
+        costs,
+        instrument_id=instrument_id,
+        amount_usd=chosen_amount,
+        now=datetime.now(UTC),
     )
 
     capped_decision = replace(decision, amount_usd=chosen_amount)
@@ -168,6 +213,8 @@ async def prepare_real_small_ticket(
         observation=observation,
         gate_decision=decision,
         eligibility=eligibility,
+        costs=costs,
+        settlement_type=settlement_type,
         broker_minimum_usd=broker_minimum,
         maximum_safe_amount_usd=maximum_safe,
     )
