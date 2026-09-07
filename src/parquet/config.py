@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class KeyConfig(BaseModel):
@@ -45,6 +45,14 @@ class EtoroConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     live_test_enabled: bool = False
     live_test_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
+    autonomous_enabled: bool = False
+    autonomous_mode: str = "shadow"
+
+    @model_validator(mode="after")
+    def validate_autonomous_mode(self) -> ExecutionConfig:
+        if self.autonomous_mode not in {"shadow", "demo"}:
+            raise ValueError("autonomous_mode must be shadow or demo")
+        return self
 
 
 class RiskConfig(BaseModel):
