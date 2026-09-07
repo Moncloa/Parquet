@@ -43,6 +43,7 @@ class WatchItem(BaseModel):
     invalidation: float | None = Field(default=None, gt=0)
     expires_at: datetime
     on_trigger: TriggerAction = TriggerAction.REASSESS
+    proposal_id: str | None = Field(default=None, min_length=1)
     rationale: str | None = None
 
 
@@ -96,16 +97,21 @@ class ReviewRequest(BaseModel):
 
 
 class RiskSnapshot(BaseModel):
+    as_of: datetime | None = None
+    equity_usd: float | None = Field(default=None, gt=0)
     open_positions: int = 0
     trades_today: int = 0
     daily_pnl_pct: float = 0.0
     weekly_pnl_pct: float = 0.0
+    open_symbols: list[str] = Field(default_factory=list)
 
 
 class MarketObservation(BaseModel):
     symbol: str = Field(min_length=1)
     price: float = Field(gt=0)
     observed_at: datetime
+    bid: float | None = Field(default=None, gt=0)
+    ask: float | None = Field(default=None, gt=0)
     timeframe: str | None = None
     candle_closed: bool = False
 
