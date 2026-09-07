@@ -51,6 +51,25 @@ class EtoroConfig(BaseModel):
     account_poll_seconds: int = Field(default=60, ge=10, le=3600)
 
 
+class StrategyConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "codex_cli"
+    codex_binary: str = "codex"
+    codex_home: Path = Path("/var/lib/parquet/codex")
+    model: str | None = None
+    reasoning_effort: str = "medium"
+    timeout_seconds: int = Field(default=240, ge=30, le=900)
+    web_search: bool = True
+
+    @model_validator(mode="after")
+    def validate_strategy(self) -> StrategyConfig:
+        if self.provider != "codex_cli":
+            raise ValueError("strategy.provider must be codex_cli")
+        if self.reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
+            raise ValueError("strategy.reasoning_effort is invalid")
+        return self
+
+
 class ExecutionConfig(BaseModel):
     live_test_enabled: bool = False
     live_test_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
@@ -107,6 +126,7 @@ class Settings(BaseModel):
     keys: KeyConfig = Field(default_factory=KeyConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     etoro: EtoroConfig = Field(default_factory=EtoroConfig)
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
@@ -134,6 +154,7 @@ def load_settings(path: Path | None = None) -> Settings:
         "PARQUET_GITHUB_TOKEN_FILE": (["github", "token_file"], str),
         "PARQUET_ETORO_API_KEY_FILE": (["etoro", "api_key_file"], str),
         "PARQUET_ETORO_USER_KEY_FILE": (["etoro", "user_key_file"], str),
+        "PARQUET_CODEX_HOME": (["strategy", "codex_home"], str),
     }
     for env_name, (keys, cast) in env_overrides.items():
         if env_name in os.environ:
