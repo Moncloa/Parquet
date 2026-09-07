@@ -8,8 +8,8 @@ from pathlib import Path
 import uvicorn
 
 from parquet.api import create_app
+from parquet.autonomous_orchestrator import AutonomousOrchestrator
 from parquet.config import load_settings
-from parquet.orchestrator import Orchestrator
 from parquet.reconciliation import ReconciliationService, run_with_reconciliation
 
 
@@ -28,7 +28,7 @@ def validate_keys(settings_path: Path | None) -> int:
 
 def serve(settings_path: Path | None) -> None:
     settings = load_settings(settings_path)
-    orchestrator = Orchestrator(settings)
+    orchestrator = AutonomousOrchestrator(settings)
     reconciliation = ReconciliationService(
         settings,
         orchestrator.storage,
@@ -58,7 +58,7 @@ def main() -> None:
         return
     if args.command == "once":
         settings = load_settings(args.config)
-        orchestrator = Orchestrator(settings)
+        orchestrator = AutonomousOrchestrator(settings)
         reconciliation = ReconciliationService(
             settings,
             orchestrator.storage,
