@@ -23,8 +23,9 @@ def _read_secret(path: Path, label: str) -> str:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate or submit one deliberately small eToro live-test order. "
-            "Use --dry-run to stop before the execution POST."
+            "Validate one deliberately small eToro live-test order. "
+            "For pinned Agent Portfolios this legacy command is dry-run only; "
+            "use `parquet real-small` for supervised real submission."
         )
     )
     parser.add_argument("--symbol", required=True)
@@ -50,6 +51,11 @@ async def run_live_test(
         raise RuntimeError("eToro is disabled")
     if not settings.execution.live_test_enabled:
         raise RuntimeError("execution.live_test_enabled is false")
+    if not dry_run and settings.etoro.expected_gcid is not None:
+        raise RuntimeError(
+            "Legacy live-test real submission is disabled for a pinned Agent Portfolio; "
+            "use `parquet prepare-real-small` and `parquet real-small`"
+        )
     if not dry_run and confirmation != CONFIRM_TEXT:
         raise RuntimeError(f"confirmation must be exactly {CONFIRM_TEXT!r}")
     if amount_usd <= 0:
