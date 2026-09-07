@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 
-from parquet.models import WatchItem
+from parquet.models import RiskSnapshot, TradeProposal, WatchItem
 from parquet.scheduler import ScheduledReview
 
 SCHEMA = """
@@ -37,6 +37,13 @@ CREATE TABLE IF NOT EXISTS watches (
     symbol TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     status TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proposals (
+    proposal_id TEXT PRIMARY KEY,
+    analysis_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
     payload TEXT NOT NULL
 );
 """
@@ -148,3 +155,37 @@ class Storage:
                 (status, watch_id),
             )
             self.conn.commit()
+
+    def save_proposal(self, analysis_id: str, proposal: TradeProposal) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO proposals"
+                "(proposal_id, analysis_id, symbol, expires_at, payload) VALUES(?, ?, ?, ?, ?)",
+                (
+                    proposal.proposal_id,
+                    analysis_id,
+                    proposal.symbol,
+                    proposal.expires_at.astimezone(UTC).isoformat(),
+                    proposal.model_dump_json(),
+                ),
+            )
+            self.conn.commit()
+
+    def get_proposal(self, proposal_id: str) -> TradeProposal | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM proposals WHERE proposal_id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return TradeProposal.model_validate_json(str(row[0]))
+
+    def set_risk_snapshot(self, snapshot: RiskSnapshot) -> None:
+        self.set("risk_snapshot", snapshot.model_dump_json())
+
+    def get_risk_snapshot(self) -> RiskSnapshot | None:
+        payload = self.get("risk_snapshot")
+        if payload is None:
+            return None
+        return RiskSnapshot.model_validate_json(payload)
