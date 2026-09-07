@@ -163,34 +163,63 @@ class EtoroOrderLookupResult:
 
 
 def market_order_payload(
-    *, transaction: str, instrument_id: int, amount_usd: float, stop_loss_rate: float,
+    *,
+    transaction: str,
+    instrument_id: int,
+    amount_usd: float,
+    stop_loss_rate: float,
     take_profit_rate: float | None = None,
+    settlement_type: str | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_open_transaction(transaction)
     payload: dict[str, Any] = {
-        "action": "open", "transaction": normalized, "instrumentId": instrument_id,
-        "orderType": "mkt", "amount": amount_usd, "orderCurrency": "usd", "leverage": 1,
-        "stopLossRate": stop_loss_rate, "stopLossType": "fixed",
+        "action": "open",
+        "transaction": normalized,
+        "instrumentId": instrument_id,
+        "orderType": "mkt",
+        "amount": amount_usd,
+        "orderCurrency": "usd",
+        "leverage": 1,
+        "stopLossRate": stop_loss_rate,
+        "stopLossType": "fixed",
     }
+    if settlement_type is not None:
+        payload["settlementType"] = settlement_type
     if take_profit_rate is not None:
         payload["takeProfitRate"] = take_profit_rate
     return payload
 
 
-def market_buy_payload(*, instrument_id: int, amount_usd: float, stop_loss_rate: float,
-                       take_profit_rate: float | None = None) -> dict[str, Any]:
-    return market_order_payload(transaction="buy", instrument_id=instrument_id,
-                                amount_usd=amount_usd, stop_loss_rate=stop_loss_rate,
-                                take_profit_rate=take_profit_rate)
+def market_buy_payload(
+    *,
+    instrument_id: int,
+    amount_usd: float,
+    stop_loss_rate: float,
+    take_profit_rate: float | None = None,
+    settlement_type: str | None = None,
+) -> dict[str, Any]:
+    return market_order_payload(
+        transaction="buy",
+        instrument_id=instrument_id,
+        amount_usd=amount_usd,
+        stop_loss_rate=stop_loss_rate,
+        take_profit_rate=take_profit_rate,
+        settlement_type=settlement_type,
+    )
 
 
 class EtoroExecutionClient:
     """eToro real execution client with no automatic write retries."""
 
-    def __init__(self, *, api_key: str, user_key: str,
-                 base_url: str = "https://public-api.etoro.com/api/v2",
-                 identity_base_url: str = "https://public-api.etoro.com/api/v1",
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        user_key: str,
+        base_url: str = "https://public-api.etoro.com/api/v2",
+        identity_base_url: str = "https://public-api.etoro.com/api/v1",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.api_key = api_key
         self.user_key = user_key
         self.base_url = base_url.rstrip("/")
@@ -198,8 +227,12 @@ class EtoroExecutionClient:
         self.transport = transport
 
     def _headers(self, request_id: str, *, json_body: bool = False) -> dict[str, str]:
-        headers = {"x-api-key": self.api_key, "x-user-key": self.user_key,
-                   "x-request-id": request_id, "accept": "application/json"}
+        headers = {
+            "x-api-key": self.api_key,
+            "x-user-key": self.user_key,
+            "x-request-id": request_id,
+            "accept": "application/json",
+        }
         if json_body:
             headers["content-type"] = "application/json"
         return headers
@@ -208,125 +241,273 @@ class EtoroExecutionClient:
         request_id = str(uuid4())
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
-                response = await client.get(f"{self.identity_base_url}/me", headers=self._headers(request_id))
+                response = await client.get(
+                    f"{self.identity_base_url}/me",
+                    headers=self._headers(request_id),
+                )
         except httpx.RequestError as exc:
             raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
         if response.is_error:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
         body = _json_object(response, request_id, "identity")
+
         raw_gcid = body.get("gcid")
         if raw_gcid is None:
             raise EtoroExecutionError(response.status_code, "identity response missing gcid", request_id)
         scopes = body.get("scopes")
-        return EtoroIdentity(gcid=int(raw_gcid), real_cid=_optional_int(body.get("realCid")),
-                             demo_cid=_optional_int(body.get("demoCid")),
-                             scopes=frozenset(str(item) for item in scopes) if isinstance(scopes, list) else frozenset())
+        return EtoroIdentity(
+            gcid=int(raw_gcid),
+            real_cid=_optional_int(body.get("realCid")),
+            demo_cid=_optional_int(body.get("demoCid")),
+            scopes=(
+                frozenset(str(item) for item in scopes)
+                if isinstance(scopes, list)
+                else frozenset()
+            ),
+        )
 
     async def instrument_eligibility(self, *, instrument_id: int) -> EtoroEligibilityResult:
         request_id = str(uuid4())
-        payload = {"instrumentIds": [instrument_id], "currency": "USD"}
+        payload = {
+            "instrumentIds": [instrument_id],
+            "currency": "USD",
+        }
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
-                response = await client.post(f"{self.base_url}/trading/info/eligibility",
-                                             headers=self._headers(request_id, json_body=True), json=payload)
+                response = await client.post(
+                    f"{self.base_url}/trading/info/eligibility",
+                    headers=self._headers(request_id, json_body=True),
+                    json=payload,
+                )
         except httpx.RequestError as exc:
             raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
         if response.is_error:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
         body = _json_object(response, request_id, "eligibility")
         raw_items = body.get("eligibilities")
         if not isinstance(raw_items, list):
-            raise EtoroExecutionError(response.status_code, "eligibility response missing eligibilities", request_id)
-        item = next((candidate for candidate in raw_items if isinstance(candidate, dict)
-                     and _optional_int(candidate.get("instrumentId")) == instrument_id), None)
+            raise EtoroExecutionError(
+                response.status_code,
+                "eligibility response missing eligibilities",
+                request_id,
+            )
+        item = next(
+            (
+                candidate
+                for candidate in raw_items
+                if isinstance(candidate, dict)
+                and _optional_int(candidate.get("instrumentId")) == instrument_id
+            ),
+            None,
+        )
         if item is None:
-            raise EtoroExecutionError(response.status_code,
-                                      f"eligibility response missing instrument {instrument_id}", request_id)
+            raise EtoroExecutionError(
+                response.status_code,
+                f"eligibility response missing instrument {instrument_id}",
+                request_id,
+            )
         raw_configs = item.get("leverageConfigs")
-        configs = tuple(config for config in raw_configs if isinstance(config, dict)) if isinstance(raw_configs, list) else ()
+        configs = (
+            tuple(config for config in raw_configs if isinstance(config, dict))
+            if isinstance(raw_configs, list)
+            else ()
+        )
         raw_minimum = item.get("minPositionExposure")
-        return EtoroEligibilityResult(request_id=request_id, instrument_id=instrument_id,
+        return EtoroEligibilityResult(
+            request_id=request_id,
+            instrument_id=instrument_id,
             symbol=None if item.get("symbol") is None else str(item.get("symbol")),
-            min_position_exposure=None if raw_minimum is None else float(raw_minimum),
-            allow_open_position=bool(item.get("allowOpenPosition")), leverage_configs=configs, response=body)
+            min_position_exposure=(None if raw_minimum is None else float(raw_minimum)),
+            allow_open_position=bool(item.get("allowOpenPosition")),
+            leverage_configs=configs,
+            response=body,
+        )
 
-    async def what_if_open_costs(self, *, transaction: str, instrument_id: int,
-                                 settlement_type: str, amount_usd: float,
-                                 stop_loss_rate: float, take_profit_rate: float | None = None,
-                                 leverage: int = 1) -> EtoroCostResult:
+    async def what_if_open_costs(
+        self,
+        *,
+        transaction: str,
+        instrument_id: int,
+        settlement_type: str,
+        amount_usd: float,
+        stop_loss_rate: float | None = None,
+        take_profit_rate: float | None = None,
+        leverage: int = 1,
+    ) -> EtoroCostResult:
         request_id = str(uuid4())
         payload: dict[str, Any] = {
-            "action": "open", "transaction": _normalize_open_transaction(transaction),
-            "instrumentId": instrument_id, "settlementType": settlement_type,
-            "orderType": "mkt", "leverage": leverage, "amount": amount_usd,
-            "orderCurrency": "usd", "stopLossRate": stop_loss_rate, "stopLossType": "fixed",
+            "action": "open",
+            "transaction": _normalize_open_transaction(transaction),
+            "instrumentId": instrument_id,
+            "settlementType": settlement_type,
+            "orderType": "mkt",
+            "leverage": leverage,
+            "amount": amount_usd,
+            "orderCurrency": "usd",
         }
+        if stop_loss_rate is not None:
+            payload["stopLossRate"] = stop_loss_rate
+            payload["stopLossType"] = "fixed"
         if take_profit_rate is not None:
             payload["takeProfitRate"] = take_profit_rate
+
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
-                response = await client.post(f"{self.base_url}/trading/info/costs",
-                                             headers=self._headers(request_id, json_body=True), json=payload)
+                response = await client.post(
+                    f"{self.base_url}/trading/info/costs",
+                    headers=self._headers(request_id, json_body=True),
+                    json=payload,
+                )
         except httpx.RequestError as exc:
             raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
         if response.is_error:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
         body = _json_object(response, request_id, "cost")
         if _optional_int(body.get("instrumentId")) != instrument_id:
-            raise EtoroExecutionError(response.status_code, "cost response instrument mismatch", request_id)
+            raise EtoroExecutionError(
+                response.status_code,
+                "cost response instrument mismatch",
+                request_id,
+            )
         raw_costs = body.get("costs")
         if not isinstance(raw_costs, list):
-            raise EtoroExecutionError(response.status_code, "cost response missing costs", request_id)
+            raise EtoroExecutionError(
+                response.status_code,
+                "cost response missing costs",
+                request_id,
+            )
         costs: list[EtoroCostComponent] = []
         for item in raw_costs:
-            if not isinstance(item, dict) or item.get("costType") is None or item.get("amount") is None or item.get("currency") is None:
-                raise EtoroExecutionError(response.status_code, "invalid cost component", request_id)
-            costs.append(EtoroCostComponent(cost_type=str(item["costType"]), amount=float(item["amount"]), currency=str(item["currency"])))
+            if (
+                not isinstance(item, dict)
+                or item.get("costType") is None
+                or item.get("amount") is None
+                or item.get("currency") is None
+            ):
+                raise EtoroExecutionError(
+                    response.status_code,
+                    "invalid cost component",
+                    request_id,
+                )
+            costs.append(
+                EtoroCostComponent(
+                    cost_type=str(item["costType"]),
+                    amount=float(item["amount"]),
+                    currency=str(item["currency"]),
+                )
+            )
         raw_updated = body.get("lastUpdated")
         if raw_updated is None:
-            raise EtoroExecutionError(response.status_code, "cost response missing lastUpdated", request_id)
-        return EtoroCostResult(request_id=request_id, instrument_id=instrument_id,
-            symbol=None if body.get("symbol") is None else str(body.get("symbol")), costs=tuple(costs),
-            last_updated=datetime.fromisoformat(str(raw_updated).replace("Z", "+00:00")), response=body)
+            raise EtoroExecutionError(
+                response.status_code,
+                "cost response missing lastUpdated",
+                request_id,
+            )
+        return EtoroCostResult(
+            request_id=request_id,
+            instrument_id=instrument_id,
+            symbol=None if body.get("symbol") is None else str(body.get("symbol")),
+            costs=tuple(costs),
+            last_updated=datetime.fromisoformat(str(raw_updated).replace("Z", "+00:00")),
+            response=body,
+        )
 
-    async def open_market_order(self, *, transaction: str, instrument_id: int, amount_usd: float,
-                                stop_loss_rate: float, take_profit_rate: float | None = None,
-                                request_id: str | None = None) -> EtoroOrderResult:
+    async def open_market_order(
+        self,
+        *,
+        transaction: str,
+        instrument_id: int,
+        amount_usd: float,
+        stop_loss_rate: float,
+        take_profit_rate: float | None = None,
+        request_id: str | None = None,
+        settlement_type: str | None = None,
+    ) -> EtoroOrderResult:
         submission_request_id = request_id or str(uuid4())
-        payload = market_order_payload(transaction=transaction, instrument_id=instrument_id,
-            amount_usd=amount_usd, stop_loss_rate=stop_loss_rate, take_profit_rate=take_profit_rate)
+        payload = market_order_payload(
+            transaction=transaction,
+            instrument_id=instrument_id,
+            amount_usd=amount_usd,
+            stop_loss_rate=stop_loss_rate,
+            take_profit_rate=take_profit_rate,
+            settlement_type=settlement_type,
+        )
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
-                response = await client.post(f"{self.base_url}/trading/execution/orders",
-                    headers=self._headers(submission_request_id, json_body=True), json=payload)
+                response = await client.post(
+                    f"{self.base_url}/trading/execution/orders",
+                    headers=self._headers(submission_request_id, json_body=True),
+                    json=payload,
+                )
         except httpx.RequestError as exc:
             raise EtoroExecutionTransportError(repr(exc), submission_request_id) from exc
-        if response.is_error:
-            raise EtoroExecutionError(response.status_code, response.text[:1000], submission_request_id)
-        body = _json_object(response, submission_request_id, "order")
-        return EtoroOrderResult(request_id=submission_request_id, payload=payload, response=body)
 
-    async def lookup_order(self, *, order_id: str | int | None = None,
-                           reference_id: str | None = None) -> EtoroOrderLookupResult:
+        if response.is_error:
+            raise EtoroExecutionError(
+                response.status_code,
+                response.text[:1000],
+                submission_request_id,
+            )
+
+        body = _json_object(response, submission_request_id, "order")
+        return EtoroOrderResult(
+            request_id=submission_request_id,
+            payload=payload,
+            response=body,
+        )
+
+    async def lookup_order(
+        self,
+        *,
+        order_id: str | int | None = None,
+        reference_id: str | None = None,
+    ) -> EtoroOrderLookupResult:
         if (order_id is None) == (reference_id is None):
             raise ValueError("Provide exactly one of order_id or reference_id")
         request_id = str(uuid4())
-        params = {"orderId": str(order_id)} if order_id is not None else {"referenceId": str(reference_id)}
+        params: dict[str, str] = {}
+        if order_id is not None:
+            params["orderId"] = str(order_id)
+        else:
+            params["referenceId"] = str(reference_id)
+
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
-                response = await client.get(f"{self.base_url}/trading/info/orders:lookup",
-                                            headers=self._headers(request_id), params=params)
+                response = await client.get(
+                    f"{self.base_url}/trading/info/orders:lookup",
+                    headers=self._headers(request_id),
+                    params=params,
+                )
         except httpx.RequestError as exc:
             raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
         if response.is_error:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
-        return EtoroOrderLookupResult(request_id=request_id, response=_json_object(response, request_id, "lookup"))
+        body = _json_object(response, request_id, "lookup")
+        return EtoroOrderLookupResult(request_id=request_id, response=body)
 
-    async def open_market_buy(self, *, instrument_id: int, amount_usd: float, stop_loss_rate: float,
-                              take_profit_rate: float | None = None, request_id: str | None = None) -> EtoroOrderResult:
-        return await self.open_market_order(transaction="buy", instrument_id=instrument_id,
-            amount_usd=amount_usd, stop_loss_rate=stop_loss_rate,
-            take_profit_rate=take_profit_rate, request_id=request_id)
+    async def open_market_buy(
+        self,
+        *,
+        instrument_id: int,
+        amount_usd: float,
+        stop_loss_rate: float,
+        take_profit_rate: float | None = None,
+        request_id: str | None = None,
+        settlement_type: str | None = None,
+    ) -> EtoroOrderResult:
+        return await self.open_market_order(
+            transaction="buy",
+            instrument_id=instrument_id,
+            amount_usd=amount_usd,
+            stop_loss_rate=stop_loss_rate,
+            take_profit_rate=take_profit_rate,
+            request_id=request_id,
+            settlement_type=settlement_type,
+        )
 
 
 def _normalize_open_transaction(transaction: str) -> str:
@@ -342,9 +523,17 @@ def _json_object(response: httpx.Response, request_id: str, label: str) -> dict[
     try:
         body = response.json()
     except ValueError as exc:
-        raise EtoroExecutionError(response.status_code, f"invalid JSON {label} response", request_id) from exc
+        raise EtoroExecutionError(
+            response.status_code,
+            f"invalid JSON {label} response",
+            request_id,
+        ) from exc
     if not isinstance(body, dict):
-        raise EtoroExecutionError(response.status_code, f"non-object {label} response", request_id)
+        raise EtoroExecutionError(
+            response.status_code,
+            f"non-object {label} response",
+            request_id,
+        )
     return body
 
 
