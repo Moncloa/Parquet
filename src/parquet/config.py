@@ -54,19 +54,12 @@ class EtoroConfig(BaseModel):
 class StrategyConfig(BaseModel):
     enabled: bool = False
     provider: str = "codex_cli"
-    codex_binary: str = "codex"
-    codex_home: Path = Path("/var/lib/parquet/codex")
-    model: str | None = None
-    reasoning_effort: str = "medium"
-    timeout_seconds: int = Field(default=240, ge=30, le=900)
-    web_search: bool = True
+    queue_dir: Path = Path("/var/lib/parquet/strategy")
 
     @model_validator(mode="after")
     def validate_strategy(self) -> StrategyConfig:
         if self.provider != "codex_cli":
             raise ValueError("strategy.provider must be codex_cli")
-        if self.reasoning_effort not in {"none", "low", "medium", "high", "xhigh"}:
-            raise ValueError("strategy.reasoning_effort is invalid")
         return self
 
 
@@ -154,7 +147,6 @@ def load_settings(path: Path | None = None) -> Settings:
         "PARQUET_GITHUB_TOKEN_FILE": (["github", "token_file"], str),
         "PARQUET_ETORO_API_KEY_FILE": (["etoro", "api_key_file"], str),
         "PARQUET_ETORO_USER_KEY_FILE": (["etoro", "user_key_file"], str),
-        "PARQUET_CODEX_HOME": (["strategy", "codex_home"], str),
     }
     for env_name, (keys, cast) in env_overrides.items():
         if env_name in os.environ:
