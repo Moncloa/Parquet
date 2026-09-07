@@ -5,7 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from parquet.models import MarketObservation
 
@@ -49,11 +49,26 @@ class InstrumentRate(BaseModel):
             symbol=self.symbol,
             price=price,
             observed_at=self.timestamp,
+            instrument_id=self.instrument_id,
+            bid=self.bid,
+            ask=self.ask,
         )
 
 
+class EtoroAccountSnapshot(BaseModel):
+    captured_at: datetime
+    equity_usd: float = Field(ge=0)
+    available_cash_usd: float
+    invested_usd: float
+    unrealized_pnl_usd: float
+    credit_usd: float
+    open_positions: int = Field(ge=0)
+    open_instrument_ids: list[int] = Field(default_factory=list)
+    open_symbols: list[str] = Field(default_factory=list)
+
+
 class EtoroMarketDataClient:
-    """Read-only eToro Public API client."""
+    """Read-only eToro Public API client for market and account state."""
 
     def __init__(
         self,
@@ -159,6 +174,105 @@ class EtoroMarketDataClient:
             )
         return result
 
+    async def account_snapshot(self, *, now: datetime | None = None) -> EtoroAccountSnapshot:
+        body = await self._get("/trading/info/real/pnl", params={})
+        portfolio = _client_portfolio(body)
+        account_currency_id = _optional_int(portfolio.get("accountCurrencyId"))
+        if account_currency_id not in (None, 1):
+            raise ValueError(
+                f"Only USD equity is supported; accountCurrencyId={account_currency_id}"
+            )
+
+        positions = _dict_list(portfolio.get("positions"))
+        mirrors = _dict_list(portfolio.get("mirrors"))
+        orders = _dict_list(portfolio.get("orders"))
+        orders_for_open = [
+            item
+            for item in _dict_list(portfolio.get("ordersForOpen"))
+            if _mirror_id(item) == 0
+        ]
+
+        credit = _required_float(portfolio.get("credit"), "clientPortfolio.credit")
+        open_order_amount = sum(_amount(item) for item in orders_for_open)
+        order_amount = sum(_amount(item) for item in orders)
+        available_cash = credit - open_order_amount - order_amount
+
+        mirror_positions = [
+            position
+            for mirror in mirrors
+            for position in _dict_list(mirror.get("positions"))
+        ]
+        direct_invested = sum(_amount(position) for position in positions)
+        mirror_position_invested = sum(_amount(position) for position in mirror_positions)
+        mirror_available_net = sum(
+            _optional_float(mirror.get("availableAmount"), 0.0)
+            - _optional_float(mirror.get("closedPositionsNetProfit"), 0.0)
+            for mirror in mirrors
+        )
+        external_costs = sum(
+            _optional_float(item.get("totalExternalCosts"), 0.0)
+            for item in orders_for_open
+        )
+        invested = (
+            direct_invested
+            + mirror_position_invested
+            + mirror_available_net
+            + open_order_amount
+            + order_amount
+            + external_costs
+        )
+
+        nested_unrealized = sum(_position_pnl(position) for position in positions)
+        nested_unrealized += sum(_position_pnl(position) for position in mirror_positions)
+        nested_unrealized += sum(
+            _optional_float(mirror.get("closedPositionsNetProfit"), 0.0)
+            for mirror in mirrors
+        )
+        aggregate_unrealized = _optional_float(portfolio.get("unrealizedPnL"))
+        unrealized = nested_unrealized if aggregate_unrealized is None else aggregate_unrealized
+
+        all_positions = positions + mirror_positions
+        instrument_ids = sorted(
+            {
+                instrument_id
+                for position in all_positions
+                if (instrument_id := _position_instrument_id(position)) is not None
+            }
+        )
+        symbols = sorted(
+            {
+                symbol
+                for position in all_positions
+                if (symbol := _position_symbol(position)) is not None
+            }
+        )
+
+        captured_at = (now or datetime.now(UTC)).astimezone(UTC)
+        return EtoroAccountSnapshot(
+            captured_at=captured_at,
+            equity_usd=available_cash + invested + unrealized,
+            available_cash_usd=available_cash,
+            invested_usd=invested,
+            unrealized_pnl_usd=unrealized,
+            credit_usd=credit,
+            open_positions=len(all_positions),
+            open_instrument_ids=instrument_ids,
+            open_symbols=symbols,
+        )
+
+
+def _client_portfolio(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError("eToro PnL response must be an object")
+    candidate: Any = body.get("clientPortfolio")
+    if candidate is None:
+        data = body.get("data")
+        if isinstance(data, dict):
+            candidate = data.get("clientPortfolio") or data
+    if not isinstance(candidate, dict):
+        raise ValueError("eToro PnL response is missing clientPortfolio")
+    return candidate
+
 
 def _search_items(body: Any) -> list[dict[str, Any]]:
     if not isinstance(body, dict):
@@ -188,6 +302,12 @@ def _rate_items(body: Any) -> list[dict[str, Any]]:
     return [item for item in candidate if isinstance(item, dict)]
 
 
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def _parse_timestamp(value: Any) -> datetime:
     if isinstance(value, str):
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -203,11 +323,50 @@ def _first(item: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _position_instrument_id(position: dict[str, Any]) -> int | None:
+    return _optional_int(_first(position, "instrumentId", "instrumentID", "InstrumentID"))
+
+
+def _position_symbol(position: dict[str, Any]) -> str | None:
+    return _optional_str(
+        _first(position, "symbol", "internalSymbolFull", "instrumentSymbol", "Symbol")
+    )
+
+
+def _position_pnl(position: dict[str, Any]) -> float:
+    value = position.get("unrealizedPnL")
+    if isinstance(value, dict):
+        return _optional_float(_first(value, "pnL", "pnl", "PnL"), 0.0)
+    return _optional_float(value, 0.0)
+
+
+def _amount(item: dict[str, Any]) -> float:
+    return _optional_float(item.get("amount"), 0.0)
+
+
+def _mirror_id(item: dict[str, Any]) -> int:
+    value = _optional_int(_first(item, "mirrorID", "mirrorId", "mirrorid"))
+    return 0 if value is None else value
+
+
+def _required_float(value: Any, label: str) -> float:
+    parsed = _optional_float(value)
+    if parsed is None:
+        raise ValueError(f"Missing numeric {label}")
+    return parsed
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 def _optional_str(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
-def _optional_float(value: Any) -> float | None:
+def _optional_float(value: Any, default: float | None = None) -> float | None:
     if value is None:
-        return None
+        return default
     return float(value)
