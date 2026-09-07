@@ -7,7 +7,7 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.7.0")
+    app = FastAPI(title="Parquet", version="0.8.0")
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -24,6 +24,13 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "autonomous_trading_enabled": (
                 False if reconciliation is None else reconciliation.trading_enabled
             ),
+            "autonomous_execution_configured": settings.execution.autonomous_enabled,
+            "autonomous_execution_mode": settings.execution.autonomous_mode,
+            "supervised_real_execution": settings.execution.supervised_real_enabled,
+            "supervised_real_max_amount_usd": (
+                settings.execution.supervised_real_max_amount_usd
+            ),
+            "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
             "broker_execution": False,
             "live_test_execution": settings.execution.live_test_enabled,
         }
@@ -34,6 +41,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         risk_snapshot = orchestrator.storage.get_risk_snapshot()
         reconciliation = orchestrator.storage.get_reconciliation_report()
         broker_portfolio = orchestrator.storage.get_broker_portfolio_snapshot()
+        attempts = orchestrator.storage.latest_execution_attempts()
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
@@ -63,6 +71,14 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             ),
             "managed_positions": len(orchestrator.storage.active_managed_positions()),
             "managed_orders": len(orchestrator.storage.active_managed_orders()),
+            "autonomous_execution_configured": settings.execution.autonomous_enabled,
+            "autonomous_execution_mode": settings.execution.autonomous_mode,
+            "supervised_real_execution": settings.execution.supervised_real_enabled,
+            "supervised_real_max_amount_usd": (
+                settings.execution.supervised_real_max_amount_usd
+            ),
+            "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
+            "execution_attempts": [attempt.model_dump(mode="json") for attempt in attempts],
             "live_test_execution": settings.execution.live_test_enabled,
             "live_test_max_amount_usd": settings.execution.live_test_max_amount_usd,
             "pending_reviews": [

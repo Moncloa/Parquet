@@ -6,7 +6,12 @@ import httpx
 import pytest
 
 from parquet.config import EtoroConfig, ExecutionConfig, Settings
-from parquet.execution.etoro import EtoroExecutionClient, market_buy_payload
+from parquet.execution.etoro import (
+    EtoroExecutionClient,
+    EtoroExecutionTransportError,
+    market_buy_payload,
+    market_order_payload,
+)
 from parquet.live_test import run_live_test
 
 
@@ -67,6 +72,41 @@ def test_market_buy_payload_is_reusable_for_preview() -> None:
         "stopLossType": "fixed",
         "takeProfitRate": 82_000.0,
     }
+
+
+def test_market_order_payload_supports_sell() -> None:
+    payload = market_order_payload(
+        transaction="sell",
+        instrument_id=200,
+        amount_usd=12.0,
+        stop_loss_rate=101.0,
+        take_profit_rate=95.0,
+    )
+    assert payload["transaction"] == "sell"
+    assert payload["instrumentId"] == 200
+    assert payload["amount"] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_transport_error_preserves_request_id() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timeout", request=request)
+
+    client = EtoroExecutionClient(
+        api_key="api",
+        user_key="user",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(EtoroExecutionTransportError) as caught:
+        await client.open_market_order(
+            transaction="buy",
+            instrument_id=100,
+            amount_usd=10.0,
+            stop_loss_rate=90.0,
+        )
+
+    assert caught.value.request_id
 
 
 @pytest.mark.asyncio

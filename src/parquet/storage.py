@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 
+from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
 from parquet.models import RiskSnapshot, TradeProposal, WatchItem
 from parquet.portfolio import (
     BrokerPortfolioSnapshot,
@@ -64,6 +65,15 @@ CREATE TABLE IF NOT EXISTS managed_orders (
     status TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS execution_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    proposal_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_attempts_proposal
+ON execution_attempts(proposal_id, updated_at);
 """
 
 
@@ -289,6 +299,60 @@ class Storage:
                 (status, order.model_dump_json(), local_id),
             )
             self.conn.commit()
+
+    def save_execution_attempt(self, attempt: ExecutionAttempt) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO execution_attempts(attempt_id, proposal_id, state, updated_at, payload) "
+                "VALUES(?, ?, ?, ?, ?) "
+                "ON CONFLICT(attempt_id) DO UPDATE SET "
+                "state=excluded.state, updated_at=excluded.updated_at, payload=excluded.payload",
+                (
+                    attempt.attempt_id,
+                    attempt.proposal_id,
+                    attempt.state.value,
+                    attempt.updated_at.astimezone(UTC).isoformat(),
+                    attempt.model_dump_json(),
+                ),
+            )
+            self.conn.commit()
+
+    def get_execution_attempt(self, attempt_id: str) -> ExecutionAttempt | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM execution_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ExecutionAttempt.model_validate_json(str(row[0]))
+
+    def get_active_execution_attempt_for_proposal(
+        self, proposal_id: str
+    ) -> ExecutionAttempt | None:
+        terminal = (
+            ExecutionAttemptState.REJECTED.value,
+            ExecutionAttemptState.BLOCKED.value,
+            ExecutionAttemptState.RECONCILED.value,
+        )
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM execution_attempts "
+                "WHERE proposal_id = ? AND state NOT IN (?, ?, ?) "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (proposal_id, *terminal),
+            ).fetchone()
+        if row is None:
+            return None
+        return ExecutionAttempt.model_validate_json(str(row[0]))
+
+    def latest_execution_attempts(self, limit: int = 20) -> list[ExecutionAttempt]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT payload FROM execution_attempts ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [ExecutionAttempt.model_validate_json(str(row[0])) for row in rows]
 
     def set_broker_portfolio_snapshot(self, snapshot: BrokerPortfolioSnapshot) -> None:
         self.set("broker_portfolio_snapshot", snapshot.model_dump_json())
