@@ -14,6 +14,14 @@ class EtoroExecutionError(RuntimeError):
         self.request_id = request_id
 
 
+class EtoroExecutionTransportError(RuntimeError):
+    """Transport failure where the broker outcome may be unknown."""
+
+    def __init__(self, message: str, request_id: str) -> None:
+        super().__init__(f"eToro execution transport error: {message}")
+        self.request_id = request_id
+
+
 @dataclass(frozen=True)
 class EtoroOrderResult:
     request_id: str
@@ -21,16 +29,20 @@ class EtoroOrderResult:
     response: dict[str, Any]
 
 
-def market_buy_payload(
+def market_order_payload(
     *,
+    transaction: str,
     instrument_id: int,
     amount_usd: float,
     stop_loss_rate: float,
     take_profit_rate: float | None = None,
 ) -> dict[str, Any]:
+    normalized = transaction.lower()
+    if normalized not in {"buy", "sell"}:
+        raise ValueError("transaction must be buy or sell")
     payload: dict[str, Any] = {
         "action": "open",
-        "transaction": "buy",
+        "transaction": normalized,
         "instrumentId": instrument_id,
         "orderType": "mkt",
         "amount": amount_usd,
@@ -42,6 +54,22 @@ def market_buy_payload(
     if take_profit_rate is not None:
         payload["takeProfitRate"] = take_profit_rate
     return payload
+
+
+def market_buy_payload(
+    *,
+    instrument_id: int,
+    amount_usd: float,
+    stop_loss_rate: float,
+    take_profit_rate: float | None = None,
+) -> dict[str, Any]:
+    return market_order_payload(
+        transaction="buy",
+        instrument_id=instrument_id,
+        amount_usd=amount_usd,
+        stop_loss_rate=stop_loss_rate,
+        take_profit_rate=take_profit_rate,
+    )
 
 
 class EtoroExecutionClient:
@@ -60,16 +88,18 @@ class EtoroExecutionClient:
         self.base_url = base_url.rstrip("/")
         self.transport = transport
 
-    async def open_market_buy(
+    async def open_market_order(
         self,
         *,
+        transaction: str,
         instrument_id: int,
         amount_usd: float,
         stop_loss_rate: float,
         take_profit_rate: float | None = None,
     ) -> EtoroOrderResult:
         request_id = str(uuid4())
-        payload = market_buy_payload(
+        payload = market_order_payload(
+            transaction=transaction,
             instrument_id=instrument_id,
             amount_usd=amount_usd,
             stop_loss_rate=stop_loss_rate,
@@ -82,12 +112,16 @@ class EtoroExecutionClient:
             "content-type": "application/json",
             "accept": "application/json",
         }
-        async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
-            response = await client.post(
-                f"{self.base_url}/trading/execution/orders",
-                headers=headers,
-                json=payload,
-            )
+        try:
+            async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
+                response = await client.post(
+                    f"{self.base_url}/trading/execution/orders",
+                    headers=headers,
+                    json=payload,
+                )
+        except httpx.RequestError as exc:
+            raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
         if response.is_error:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
 
@@ -95,3 +129,19 @@ class EtoroExecutionClient:
         if not isinstance(body, dict):
             raise EtoroExecutionError(response.status_code, "non-object response", request_id)
         return EtoroOrderResult(request_id=request_id, payload=payload, response=body)
+
+    async def open_market_buy(
+        self,
+        *,
+        instrument_id: int,
+        amount_usd: float,
+        stop_loss_rate: float,
+        take_profit_rate: float | None = None,
+    ) -> EtoroOrderResult:
+        return await self.open_market_order(
+            transaction="buy",
+            instrument_id=instrument_id,
+            amount_usd=amount_usd,
+            stop_loss_rate=stop_loss_rate,
+            take_profit_rate=take_profit_rate,
+        )
