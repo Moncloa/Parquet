@@ -44,9 +44,33 @@ async def test_rates_parse_official_shape_and_send_auth_headers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_parses_instrument_id() -> None:
+async def test_search_uses_exact_symbol_and_parses_items_shape() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["search"] == "TSLA"
+        assert request.url.params["internalSymbolFull"] == "TSLA"
+        assert request.url.params["fields"] == "instrumentId,internalSymbolFull,displayname"
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "instrumentId": 1002,
+                        "internalSymbolFull": "TSLA",
+                        "displayname": "Tesla",
+                    }
+                ]
+            },
+        )
+
+    client = EtoroMarketDataClient(api_key="api", transport=httpx.MockTransport(handler))
+    hits = await client.search("TSLA")
+    assert hits[0].instrument_id == 1002
+    assert hits[0].symbol == "TSLA"
+    assert hits[0].name == "Tesla"
+
+
+@pytest.mark.asyncio
+async def test_search_keeps_legacy_data_shape_compatible() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={"data": [{"instrumentId": 1002, "symbol": "TSLA", "name": "Tesla"}]},
