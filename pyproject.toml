@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "parquet-trader"
-version = "0.10.3"
+version = "0.11.0"
 description = "Event-driven trading orchestrator with ChatGPT/GitHub bridge and deterministic risk controls"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,6 +30,7 @@ dev = [
 [project.scripts]
 parquet = "parquet.main:main"
 parquet-live-test = "parquet.live_test:main"
+parquet-strategy-worker = "parquet.strategy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/parquet"]
