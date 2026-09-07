@@ -51,6 +51,18 @@ class EtoroConfig(BaseModel):
     account_poll_seconds: int = Field(default=60, ge=10, le=3600)
 
 
+class StrategyConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "codex_cli"
+    queue_dir: Path = Path("/var/lib/parquet-exchange")
+
+    @model_validator(mode="after")
+    def validate_strategy(self) -> StrategyConfig:
+        if self.provider != "codex_cli":
+            raise ValueError("strategy.provider must be codex_cli")
+        return self
+
+
 class ExecutionConfig(BaseModel):
     live_test_enabled: bool = False
     live_test_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
@@ -107,6 +119,7 @@ class Settings(BaseModel):
     keys: KeyConfig = Field(default_factory=KeyConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     etoro: EtoroConfig = Field(default_factory=EtoroConfig)
+    strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)

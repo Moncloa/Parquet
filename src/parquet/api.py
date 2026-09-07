@@ -1,15 +1,51 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from parquet.config import Settings
 from parquet.dashboard import position_payload, render_positions_dashboard
 from parquet.orchestrator import Orchestrator
+from parquet.strategy import StrategyDispatcher, StrategyQueue
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.10.3")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        task: asyncio.Task[None] | None = None
+        if settings.strategy.enabled:
+            if orchestrator.bridge is None:
+                orchestrator.storage.set(
+                    "strategy_last_error",
+                    "Strategy is enabled but GitHub bridge is disabled",
+                )
+                orchestrator.storage.set(
+                    "strategy_last_error_at", datetime.now(UTC).isoformat()
+                )
+            else:
+                dispatcher = StrategyDispatcher(
+                    queue_dir=settings.strategy.queue_dir,
+                    state_db=settings.state_db,
+                    storage=orchestrator.storage,
+                    bridge=orchestrator.bridge,
+                )
+                task = asyncio.create_task(
+                    dispatcher.run_forever(), name="parquet-strategy-dispatcher"
+                )
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    app = FastAPI(title="Parquet", version="0.11.0", lifespan=lifespan)
 
     @app.get("/positions", response_class=HTMLResponse)
     def positions_page() -> HTMLResponse:
@@ -36,6 +72,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             and reconciliation_ready
             and not execution_uncertain
         )
+        strategy = _strategy_state(settings, orchestrator)
         return {
             "status": "ok",
             "mode": settings.mode,
@@ -47,6 +84,13 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro_identity_verified": identity_verified,
             "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
             "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
+            "strategy_enabled": settings.strategy.enabled,
+            "strategy_provider": settings.strategy.provider,
+            "strategy_worker_ready": strategy["worker_ready"],
+            "strategy_worker_heartbeat_at": strategy["heartbeat_at"],
+            "strategy_pending_requests": strategy["pending_requests"],
+            "strategy_last_analysis_id": orchestrator.storage.get("strategy_last_analysis_id"),
+            "strategy_last_error": orchestrator.storage.get("strategy_last_error") or None,
             "execution_gate": True,
             "position_manager": True,
             "reconciliation_engine": True,
@@ -86,6 +130,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             and reconciliation_ready
             and not execution_uncertain
         )
+        strategy = _strategy_state(settings, orchestrator)
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
@@ -127,6 +172,16 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro_identity_verified": identity_verified,
             "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
             "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
+            "strategy_enabled": settings.strategy.enabled,
+            "strategy_provider": settings.strategy.provider,
+            "strategy_worker_ready": strategy["worker_ready"],
+            "strategy_worker_heartbeat_at": strategy["heartbeat_at"],
+            "strategy_codex_authenticated": strategy["codex_authenticated"],
+            "strategy_pending_requests": strategy["pending_requests"],
+            "strategy_last_analysis_id": orchestrator.storage.get("strategy_last_analysis_id"),
+            "strategy_last_success_at": orchestrator.storage.get("strategy_last_success_at"),
+            "strategy_last_error": orchestrator.storage.get("strategy_last_error") or None,
+            "strategy_last_error_at": orchestrator.storage.get("strategy_last_error_at"),
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
             "supervised_real_execution": settings.execution.supervised_real_enabled,
@@ -152,3 +207,40 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         }
 
     return app
+
+
+def _strategy_state(settings: Settings, orchestrator: Orchestrator) -> dict[str, object]:
+    if not settings.strategy.enabled:
+        return {
+            "worker_ready": False,
+            "heartbeat_at": None,
+            "codex_authenticated": False,
+            "pending_requests": 0,
+        }
+    queue = StrategyQueue(settings.strategy.queue_dir)
+    worker = queue.worker_status()
+    heartbeat_at = None if worker is None else worker.get("heartbeat_at")
+    codex_authenticated = bool(
+        worker is not None and worker.get("codex_authenticated") is True
+    )
+    worker_ready = codex_authenticated and _heartbeat_fresh(heartbeat_at)
+    try:
+        pending = queue.pending_count()
+    except OSError:
+        pending = 0
+    return {
+        "worker_ready": worker_ready,
+        "heartbeat_at": heartbeat_at,
+        "codex_authenticated": codex_authenticated,
+        "pending_requests": pending,
+    }
+
+
+def _heartbeat_fresh(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return False
+    return (datetime.now(UTC) - timestamp).total_seconds() <= 30
