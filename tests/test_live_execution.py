@@ -74,7 +74,7 @@ def test_market_buy_payload_is_reusable_for_preview() -> None:
     }
 
 
-def test_market_order_payload_supports_sell() -> None:
+def test_market_order_payload_maps_sell_to_sell_short() -> None:
     payload = market_order_payload(
         transaction="sell",
         instrument_id=200,
@@ -82,9 +82,67 @@ def test_market_order_payload_supports_sell() -> None:
         stop_loss_rate=101.0,
         take_profit_rate=95.0,
     )
-    assert payload["transaction"] == "sell"
+    assert payload["transaction"] == "sellShort"
     assert payload["instrumentId"] == 200
     assert payload["amount"] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_identity_reads_gcid_and_scopes() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/me"
+        return httpx.Response(
+            200,
+            json={
+                "gcid": 123,
+                "realCid": 456,
+                "demoCid": 789,
+                "scopes": ["etoro-public:real:read", "etoro-public:trade.real:write"],
+            },
+        )
+
+    client = EtoroExecutionClient(
+        api_key="api",
+        user_key="user",
+        transport=httpx.MockTransport(handler),
+    )
+    identity = await client.identity()
+
+    assert identity.gcid == 123
+    assert identity.real_cid == 456
+    assert identity.demo_cid == 789
+    assert "etoro-public:trade.real:write" in identity.scopes
+
+
+@pytest.mark.asyncio
+async def test_order_lookup_uses_exactly_one_identifier() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["query"] = request.url.query.decode()
+        return httpx.Response(
+            200,
+            json={
+                "orderId": 123,
+                "status": {"id": 3, "name": "Filled", "errorCode": 0},
+                "positionExecutions": [{"positionId": 999}],
+            },
+        )
+
+    client = EtoroExecutionClient(
+        api_key="api",
+        user_key="user",
+        transport=httpx.MockTransport(handler),
+    )
+    result = await client.lookup_order(reference_id="req-1")
+
+    assert captured["path"] == "/api/v2/trading/info/orders:lookup"
+    assert captured["query"] == "referenceId=req-1"
+    assert result.status_id == 3
+    assert result.status_name == "Filled"
+    assert result.order_id == "123"
+    assert result.position_ids == ("999",)
 
 
 @pytest.mark.asyncio

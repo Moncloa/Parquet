@@ -9,7 +9,7 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.9.0")
+    app = FastAPI(title="Parquet", version="0.10.0")
 
     @app.get("/positions", response_class=HTMLResponse)
     def positions_page() -> HTMLResponse:
@@ -26,11 +26,15 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, object]:
         reconciliation = orchestrator.storage.get_reconciliation_report()
+        authenticated_gcid = orchestrator.storage.get("etoro_authenticated_gcid")
         return {
             "status": "ok",
             "mode": settings.mode,
             "github": settings.github.enabled,
             "etoro": settings.etoro.enabled,
+            "etoro_expected_gcid": settings.etoro.expected_gcid,
+            "etoro_authenticated_gcid": authenticated_gcid,
+            "etoro_agent_portfolio_pinned": settings.etoro.expected_gcid is not None,
             "execution_gate": True,
             "position_manager": True,
             "reconciliation_engine": True,
@@ -46,7 +50,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 settings.execution.supervised_real_max_amount_usd
             ),
             "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
-            "broker_execution": False,
+            "broker_execution": settings.execution.supervised_real_enabled,
             "live_test_execution": settings.execution.live_test_enabled,
         }
 
@@ -58,6 +62,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         broker_portfolio = orchestrator.storage.get_broker_portfolio_snapshot()
         attempts = orchestrator.storage.latest_execution_attempts()
         positions = orchestrator.storage.managed_positions()
+        authenticated_gcid = orchestrator.storage.get("etoro_authenticated_gcid")
+        authenticated_scopes = orchestrator.storage.get("etoro_authenticated_scopes")
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
@@ -88,12 +94,17 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "managed_positions": len(orchestrator.storage.active_managed_positions()),
             "managed_closed_positions": len([item for item in positions if item.status != "OPEN"]),
             "managed_orders": len(orchestrator.storage.active_managed_orders()),
+            "etoro_expected_gcid": settings.etoro.expected_gcid,
+            "etoro_authenticated_gcid": authenticated_gcid,
+            "etoro_authenticated_scopes": authenticated_scopes,
+            "etoro_agent_portfolio_pinned": settings.etoro.expected_gcid is not None,
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
             "supervised_real_execution": settings.execution.supervised_real_enabled,
             "supervised_real_max_amount_usd": (
                 settings.execution.supervised_real_max_amount_usd
             ),
+            "broker_execution": settings.execution.supervised_real_enabled,
             "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
             "execution_attempts": [attempt.model_dump(mode="json") for attempt in attempts],
             "live_test_execution": settings.execution.live_test_enabled,

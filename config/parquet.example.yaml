@@ -20,6 +20,14 @@ etoro:
   user_key_file: /etc/parquet/etoro_user_key
   base_url: https://public-api.etoro.com/api/v1
   execution_base_url: https://public-api.etoro.com/api/v2
+  # Required before supervised real execution. Pin this to the dedicated
+  # Agent Portfolio GCID returned by `parquet etoro-check` / eToro `/me`.
+  expected_gcid: null
+  required_real_scopes:
+    - etoro-public:real:read
+    - etoro-public:real:write
+    - etoro-public:trade.real:read
+    - etoro-public:trade.real:write
   max_quote_age_seconds: 120
   account_poll_seconds: 60
   review_symbols:
@@ -35,9 +43,21 @@ etoro:
   instrument_ids: {}
 
 execution:
-  # Manual one-shot bootstrap only. Autonomous broker execution remains disabled.
+  # Manual one-shot bootstrap path.
   live_test_enabled: false
   live_test_max_amount_usd: 25.0
+
+  # Autonomous execution remains shadow/demo only.
+  autonomous_enabled: false
+  autonomous_mode: shadow
+
+  # Real Agent Portfolio execution is a separate supervised gate.
+  supervised_real_enabled: false
+  supervised_real_max_amount_usd: 25.0
+
+  # Read-only order lookup after a submission. The POST itself is never retried.
+  broker_lookup_attempts: 10
+  broker_lookup_interval_seconds: 0.5
 
 risk:
   stop_loss_required: true
