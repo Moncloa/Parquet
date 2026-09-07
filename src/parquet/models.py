@@ -79,9 +79,11 @@ class NextReview(BaseModel):
 class MarketAnalysis(BaseModel):
     schema_version: int = 1
     analysis_id: str = Field(min_length=1)
+    review_request_id: str | None = Field(default=None, min_length=1)
     generated_at: datetime
     market_regime: str = "unknown"
     summary: str = ""
+    sources: list[str] = Field(default_factory=list)
     watch: list[WatchItem] = Field(default_factory=list)
     trade_proposals: list[TradeProposal] = Field(default_factory=list)
     next_review: NextReview | None = None
