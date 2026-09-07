@@ -53,12 +53,7 @@ class InstrumentRate(BaseModel):
 
 
 class EtoroMarketDataClient:
-    """Read-only eToro Public API client.
-
-    Credentials are injected by the caller. This module deliberately does not
-    decide how `/etc/parquet/private_key.pem` or `public_key.pem` map to eToro
-    credentials.
-    """
+    """Read-only eToro Public API client."""
 
     def __init__(
         self,
@@ -104,19 +99,33 @@ class EtoroMarketDataClient:
         return response.json()
 
     async def search(self, query: str) -> list[InstrumentSearchHit]:
-        body = await self._get("/market-data/search", params={"search": query})
-        items = body.get("data", []) if isinstance(body, dict) else []
-        if not isinstance(items, list):
-            return []
+        body = await self._get(
+            "/market-data/search",
+            params={
+                "internalSymbolFull": query,
+                "fields": "instrumentId,internalSymbolFull,displayname",
+            },
+        )
+        items = _search_items(body)
         results: list[InstrumentSearchHit] = []
         for item in items:
-            if not isinstance(item, dict) or "instrumentId" not in item:
+            raw_id = item.get("instrumentId", item.get("InstrumentID"))
+            if raw_id is None:
                 continue
             results.append(
                 InstrumentSearchHit(
-                    instrument_id=int(item["instrumentId"]),
-                    symbol=_optional_str(item.get("symbol")),
-                    name=_optional_str(item.get("name") or item.get("instrumentName")),
+                    instrument_id=int(raw_id),
+                    symbol=_optional_str(
+                        item.get("internalSymbolFull")
+                        or item.get("symbol")
+                        or item.get("Symbol")
+                    ),
+                    name=_optional_str(
+                        item.get("displayname")
+                        or item.get("displayName")
+                        or item.get("name")
+                        or item.get("instrumentName")
+                    ),
                 )
             )
         return results
@@ -131,19 +140,39 @@ class EtoroMarketDataClient:
         items = _rate_items(body)
         result: list[InstrumentRate] = []
         for item in items:
+            raw_id = item.get("instrumentId", item.get("InstrumentID"))
+            if raw_id is None:
+                continue
             timestamp = _parse_timestamp(item.get("timestamp"))
             result.append(
                 InstrumentRate(
-                    instrument_id=int(item["instrumentId"]),
-                    symbol=_optional_str(item.get("symbol")),
+                    instrument_id=int(raw_id),
+                    symbol=_optional_str(
+                        item.get("symbol") or item.get("internalSymbolFull")
+                    ),
                     bid=_optional_float(item.get("bid")),
                     ask=_optional_float(item.get("ask")),
-                    last_price=_optional_float(item.get("lastPrice")),
+                    last_price=_optional_float(
+                        item.get("lastPrice", item.get("lastExecution"))
+                    ),
                     change=_optional_float(item.get("change")),
                     timestamp=timestamp,
                 )
             )
         return result
+
+
+def _search_items(body: Any) -> list[dict[str, Any]]:
+    if not isinstance(body, dict):
+        return []
+    candidate: Any = body.get("items")
+    if candidate is None:
+        candidate = body.get("data")
+        if isinstance(candidate, dict):
+            candidate = candidate.get("items") or candidate.get("data")
+    if not isinstance(candidate, list):
+        return []
+    return [item for item in candidate if isinstance(item, dict)]
 
 
 def _rate_items(body: Any) -> list[dict[str, Any]]:
@@ -158,7 +187,7 @@ def _rate_items(body: Any) -> list[dict[str, Any]]:
             candidate = data
     if not isinstance(candidate, list):
         return []
-    return [item for item in candidate if isinstance(item, dict) and "instrumentId" in item]
+    return [item for item in candidate if isinstance(item, dict)]
 
 
 def _parse_timestamp(value: Any) -> datetime:
