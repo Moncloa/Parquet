@@ -25,6 +25,7 @@ class EtoroConfig(BaseModel):
     api_key_file: Path = Path("/etc/parquet/etoro_api_key")
     user_key_file: Path = Path("/etc/parquet/etoro_user_key")
     base_url: str = "https://public-api.etoro.com/api/v1"
+    execution_base_url: str = "https://public-api.etoro.com/api/v2"
     review_symbols: list[str] = Field(
         default_factory=lambda: [
             "GER40",
@@ -39,6 +40,11 @@ class EtoroConfig(BaseModel):
     instrument_ids: dict[str, int] = Field(default_factory=dict)
     max_quote_age_seconds: int = Field(default=120, ge=1, le=3600)
     account_poll_seconds: int = Field(default=60, ge=10, le=3600)
+
+
+class ExecutionConfig(BaseModel):
+    live_test_enabled: bool = False
+    live_test_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
 
 
 class RiskConfig(BaseModel):
@@ -80,6 +86,7 @@ class Settings(BaseModel):
     keys: KeyConfig = Field(default_factory=KeyConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     etoro: EtoroConfig = Field(default_factory=EtoroConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
 

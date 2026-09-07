@@ -19,6 +19,7 @@ etoro:
   api_key_file: /etc/parquet/etoro_api_key
   user_key_file: /etc/parquet/etoro_user_key
   base_url: https://public-api.etoro.com/api/v1
+  execution_base_url: https://public-api.etoro.com/api/v2
   max_quote_age_seconds: 120
   account_poll_seconds: 60
   review_symbols:
@@ -32,6 +33,11 @@ etoro:
   # Optional aliases/cache for symbols whose eToro internal name differs.
   # Example: GOLD: 559 and OIL: 784 for the 24/7 instruments.
   instrument_ids: {}
+
+execution:
+  # Manual one-shot bootstrap only. Autonomous broker execution remains disabled.
+  live_test_enabled: false
+  live_test_max_amount_usd: 25.0
 
 risk:
   stop_loss_required: true
