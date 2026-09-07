@@ -47,7 +47,12 @@ class RiskConfig(BaseModel):
     max_trades_per_day: int = 5
     max_daily_loss_pct: float = 3.0
     max_weekly_loss_pct: float = 6.0
-    max_risk_per_trade_pct: float = 1.0
+    max_risk_per_trade_pct: float = Field(default=1.0, gt=0, le=100)
+    max_position_notional_pct: float = Field(default=100.0, gt=0, le=100)
+    max_spread_bps: float = Field(default=30.0, gt=0)
+    max_entry_slippage_bps: float = Field(default=20.0, ge=0)
+    max_risk_snapshot_age_seconds: int = Field(default=120, ge=1, le=3600)
+    allow_duplicate_symbol_positions: bool = False
 
 
 class StructuralReview(BaseModel):
