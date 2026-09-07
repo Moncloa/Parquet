@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 from parquet.bridge.github import GitHubBridge
 from parquet.config import Settings
+from parquet.market.etoro import EtoroMarketDataClient, InstrumentRate
 from parquet.models import (
     MarketAnalysis,
     MarketObservation,
@@ -21,7 +23,11 @@ from parquet.watch import WatchEngine
 
 
 class Orchestrator:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        market_client: EtoroMarketDataClient | None = None,
+    ) -> None:
         self.settings = settings
         self.storage = Storage(settings.state_db)
         self.watch_engine = WatchEngine()
@@ -37,7 +43,23 @@ class Orchestrator:
             if settings.github.enabled
             else None
         )
+        self.market_client = market_client or self._build_market_client()
+        self._instrument_ids = {
+            symbol.upper(): instrument_id
+            for symbol, instrument_id in settings.etoro.instrument_ids.items()
+        }
         self.ensure_structural_reviews()
+
+    def _build_market_client(self) -> EtoroMarketDataClient | None:
+        if not self.settings.etoro.enabled:
+            return None
+        api_key = _read_secret(self.settings.etoro.api_key_file, "eToro API key")
+        user_key = _read_secret(self.settings.etoro.user_key_file, "eToro User key")
+        return EtoroMarketDataClient(
+            api_key=api_key,
+            user_key=user_key,
+            base_url=self.settings.etoro.base_url,
+        )
 
     def add_review(self, review: ScheduledReview) -> None:
         self.reviews.add(review)
@@ -115,20 +137,139 @@ class Orchestrator:
         self.storage.set("github_last_comment_id", str(last_id))
         return processed
 
+    async def _resolve_instrument_ids(self, symbols: list[str]) -> dict[str, int]:
+        if self.market_client is None:
+            return {}
+        resolved: dict[str, int] = {}
+        for symbol in symbols:
+            key = symbol.upper()
+            instrument_id = self._instrument_ids.get(key)
+            if instrument_id is None:
+                hits = await self.market_client.search(symbol)
+                exact = next(
+                    (
+                        hit
+                        for hit in hits
+                        if hit.symbol is not None and hit.symbol.upper() == key
+                    ),
+                    None,
+                )
+                if exact is None:
+                    self.storage.add_event(
+                        "market_symbol_unresolved",
+                        json.dumps({"symbol": symbol}),
+                    )
+                    continue
+                instrument_id = exact.instrument_id
+                self._instrument_ids[key] = instrument_id
+            resolved[symbol] = instrument_id
+        return resolved
+
+    async def _rates_for_symbols(self, symbols: list[str]) -> dict[str, InstrumentRate]:
+        if self.market_client is None or not symbols:
+            return {}
+        resolved = await self._resolve_instrument_ids(symbols)
+        if not resolved:
+            return {}
+        rates = await self.market_client.rates(sorted(set(resolved.values())))
+        by_id = {rate.instrument_id: rate for rate in rates}
+        return {
+            symbol: by_id[instrument_id]
+            for symbol, instrument_id in resolved.items()
+            if instrument_id in by_id
+        }
+
+    async def _market_context(
+        self,
+        symbols: list[str],
+        current: datetime,
+    ) -> dict[str, object]:
+        rates = await self._rates_for_symbols(symbols)
+        quotes: dict[str, object] = {}
+        for symbol, rate in rates.items():
+            age_seconds = max(0.0, (current.astimezone(UTC) - rate.timestamp).total_seconds())
+            quotes[symbol] = {
+                "instrument_id": rate.instrument_id,
+                "bid": rate.bid,
+                "ask": rate.ask,
+                "last_price": rate.last_price,
+                "change": rate.change,
+                "timestamp": rate.timestamp.isoformat(),
+                "age_seconds": round(age_seconds, 3),
+                "stale": age_seconds > self.settings.etoro.max_quote_age_seconds,
+            }
+        unresolved = sorted(set(symbols) - set(rates))
+        return {
+            "market_data": {
+                "provider": "etoro",
+                "captured_at": current.astimezone(UTC).isoformat(),
+                "quotes": quotes,
+                "unresolved_symbols": unresolved,
+            }
+        }
+
+    async def poll_market_once(self, now: datetime | None = None) -> int:
+        if self.market_client is None:
+            return 0
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        symbols = sorted({watch.symbol for watch in self.storage.active_watches(current)})
+        if not symbols:
+            return 0
+        try:
+            rates = await self._rates_for_symbols(symbols)
+        except Exception as exc:
+            self.storage.add_event("market_poll_error", json.dumps({"error": repr(exc)}))
+            return 0
+        processed = 0
+        for symbol, rate in rates.items():
+            price = _usable_price(rate)
+            if price is None:
+                self.storage.add_event(
+                    "market_rate_unusable",
+                    json.dumps({"symbol": symbol, "instrument_id": rate.instrument_id}),
+                )
+                continue
+            observation = MarketObservation(
+                symbol=symbol,
+                price=price,
+                observed_at=rate.timestamp,
+            )
+            self.process_observation(observation)
+            processed += 1
+        return processed
+
     async def post_due_reviews(self, now: datetime | None = None) -> int:
         if self.bridge is None:
             return 0
-        current = now or datetime.now(UTC)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         due = self.reviews.due(current)
 
-        active_symbols = sorted({watch.symbol for watch in self.storage.active_watches(current)})
+        active_symbols = {watch.symbol for watch in self.storage.active_watches(current)}
+        review_symbols = sorted(active_symbols | set(self.settings.etoro.review_symbols))
+        context: dict[str, object] = {}
+        if self.market_client is not None and review_symbols:
+            try:
+                context = await self._market_context(review_symbols, current)
+            except Exception as exc:
+                self.storage.add_event(
+                    "market_snapshot_error",
+                    json.dumps({"error": repr(exc)}),
+                )
+                context = {
+                    "market_data": {
+                        "provider": "etoro",
+                        "error": repr(exc),
+                    }
+                }
+
         count = 0
         for review in due:
             request = ReviewRequest(
                 request_id=str(uuid4()),
                 requested_at=current,
                 reason=review.reason,
-                symbols=active_symbols,
+                symbols=review_symbols,
+                context=context,
             )
             await self.bridge.post_review_request(request)
             self.storage.add_event("review_request", request.model_dump_json())
@@ -142,7 +283,26 @@ class Orchestrator:
             try:
                 await self.poll_github_once()
                 self.ensure_structural_reviews()
+                await self.poll_market_once()
                 await self.post_due_reviews()
             except Exception as exc:
                 self.storage.add_event("orchestrator_error", json.dumps({"error": repr(exc)}))
             await asyncio.sleep(self.settings.poll_seconds)
+
+
+def _read_secret(path: Path, label: str) -> str:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Missing {label} file: {path}") from exc
+    if not value:
+        raise RuntimeError(f"Empty {label} file: {path}")
+    return value
+
+
+def _usable_price(rate: InstrumentRate) -> float | None:
+    if rate.last_price is not None:
+        return rate.last_price
+    if rate.bid is not None and rate.ask is not None:
+        return (rate.bid + rate.ask) / 2
+    return None
