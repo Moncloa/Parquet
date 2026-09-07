@@ -9,7 +9,7 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.10.0")
+    app = FastAPI(title="Parquet", version="0.10.1")
 
     @app.get("/positions", response_class=HTMLResponse)
     def positions_page() -> HTMLResponse:
@@ -27,6 +27,15 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     def health() -> dict[str, object]:
         reconciliation = orchestrator.storage.get_reconciliation_report()
         authenticated_gcid = orchestrator.storage.get("etoro_authenticated_gcid")
+        identity_verified = orchestrator.storage.get("etoro_identity_verified") == "1"
+        execution_uncertain = orchestrator.storage.get("execution_uncertain") == "1"
+        reconciliation_ready = reconciliation is not None and reconciliation.trading_enabled
+        broker_execution_ready = (
+            settings.execution.supervised_real_enabled
+            and identity_verified
+            and reconciliation_ready
+            and not execution_uncertain
+        )
         return {
             "status": "ok",
             "mode": settings.mode,
@@ -35,22 +44,23 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro_expected_gcid": settings.etoro.expected_gcid,
             "etoro_authenticated_gcid": authenticated_gcid,
             "etoro_agent_portfolio_pinned": settings.etoro.expected_gcid is not None,
+            "etoro_identity_verified": identity_verified,
+            "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
+            "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
             "execution_gate": True,
             "position_manager": True,
             "reconciliation_engine": True,
             "positions_dashboard": True,
             "reconciliation_state": None if reconciliation is None else reconciliation.state.value,
-            "autonomous_trading_enabled": (
-                False if reconciliation is None else reconciliation.trading_enabled
-            ),
+            "autonomous_trading_enabled": reconciliation_ready,
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
             "supervised_real_execution": settings.execution.supervised_real_enabled,
             "supervised_real_max_amount_usd": (
                 settings.execution.supervised_real_max_amount_usd
             ),
-            "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
-            "broker_execution": settings.execution.supervised_real_enabled,
+            "execution_uncertain": execution_uncertain,
+            "broker_execution": broker_execution_ready,
             "live_test_execution": settings.execution.live_test_enabled,
         }
 
@@ -64,6 +74,15 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         positions = orchestrator.storage.managed_positions()
         authenticated_gcid = orchestrator.storage.get("etoro_authenticated_gcid")
         authenticated_scopes = orchestrator.storage.get("etoro_authenticated_scopes")
+        identity_verified = orchestrator.storage.get("etoro_identity_verified") == "1"
+        execution_uncertain = orchestrator.storage.get("execution_uncertain") == "1"
+        reconciliation_ready = reconciliation is not None and reconciliation.trading_enabled
+        broker_execution_ready = (
+            settings.execution.supervised_real_enabled
+            and identity_verified
+            and reconciliation_ready
+            and not execution_uncertain
+        )
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
@@ -75,9 +94,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "risk_open_positions": None if risk_snapshot is None else risk_snapshot.open_positions,
             "reconciliation_state": None if reconciliation is None else reconciliation.state.value,
             "reconciliation_as_of": None if reconciliation is None else reconciliation.as_of,
-            "autonomous_trading_enabled": (
-                False if reconciliation is None else reconciliation.trading_enabled
-            ),
+            "autonomous_trading_enabled": reconciliation_ready,
             "reconciliation_issues": (
                 []
                 if reconciliation is None
@@ -96,16 +113,25 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "managed_orders": len(orchestrator.storage.active_managed_orders()),
             "etoro_expected_gcid": settings.etoro.expected_gcid,
             "etoro_authenticated_gcid": authenticated_gcid,
+            "etoro_authenticated_real_cid": orchestrator.storage.get(
+                "etoro_authenticated_real_cid"
+            ),
+            "etoro_authenticated_demo_cid": orchestrator.storage.get(
+                "etoro_authenticated_demo_cid"
+            ),
             "etoro_authenticated_scopes": authenticated_scopes,
             "etoro_agent_portfolio_pinned": settings.etoro.expected_gcid is not None,
+            "etoro_identity_verified": identity_verified,
+            "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
+            "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
             "supervised_real_execution": settings.execution.supervised_real_enabled,
             "supervised_real_max_amount_usd": (
                 settings.execution.supervised_real_max_amount_usd
             ),
-            "broker_execution": settings.execution.supervised_real_enabled,
-            "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
+            "broker_execution": broker_execution_ready,
+            "execution_uncertain": execution_uncertain,
             "execution_attempts": [attempt.model_dump(mode="json") for attempt in attempts],
             "live_test_execution": settings.execution.live_test_enabled,
             "live_test_max_amount_usd": settings.execution.live_test_max_amount_usd,

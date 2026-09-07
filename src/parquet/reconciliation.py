@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from typing import Any
 
 from parquet.config import Settings
+from parquet.market.etoro import EtoroMarketDataClient
 from parquet.models import RiskSnapshot
 from parquet.orchestrator import Orchestrator
 from parquet.portfolio import PositionManager
@@ -13,27 +15,101 @@ from parquet.storage import Storage
 
 
 class ReconciliationService:
-    """Polls the broker, reconciles the durable ledger and refreshes risk state."""
+    """Polls the broker, verifies identity and refreshes durable portfolio/risk state."""
 
     def __init__(
         self,
         settings: Settings,
         storage: Storage,
-        market_client: object | None,
+        market_client: EtoroMarketDataClient | None,
     ) -> None:
         self.settings = settings
         self.storage = storage
         self.position_manager = PositionManager(storage)
-        self.reader = (
-            EtoroPortfolioReader(market_client)  # type: ignore[arg-type]
-            if market_client is not None
-            else None
-        )
+        self.market_client = market_client
+        self.reader = EtoroPortfolioReader(market_client) if market_client is not None else None
         self._last_poll_at: datetime | None = None
         self._reverse_ids = {
             instrument_id: symbol.upper()
             for symbol, instrument_id in settings.etoro.instrument_ids.items()
         }
+
+    async def verify_identity_once(self, *, now: datetime | None = None) -> bool:
+        """Verify the authenticated eToro identity and persist the result.
+
+        A configured ``expected_gcid`` is a hard account boundary: if the token
+        resolves to another GCID, or required real scopes disappear, reconciliation
+        is put into ERROR so every execution gate fails closed.
+        """
+
+        if self.market_client is None:
+            return False
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        checked_at = current.isoformat()
+
+        try:
+            body = await self.market_client._get("/me", params={})
+            identity = _parse_identity(body)
+            self.storage.set("etoro_authenticated_gcid", str(identity["gcid"]))
+            self.storage.set("etoro_authenticated_real_cid", _optional_text(identity["real_cid"]))
+            self.storage.set("etoro_authenticated_demo_cid", _optional_text(identity["demo_cid"]))
+            self.storage.set("etoro_authenticated_scopes", json.dumps(sorted(identity["scopes"])))
+            self.storage.set("etoro_identity_checked_at", checked_at)
+
+            expected_gcid = self.settings.etoro.expected_gcid
+            if expected_gcid is None:
+                self.storage.set("etoro_identity_verified", "0")
+                self.storage.set("etoro_identity_error", "Agent Portfolio GCID is not pinned")
+                return True
+
+            if identity["gcid"] != expected_gcid:
+                raise ValueError(
+                    f"eToro authenticated GCID {identity['gcid']} does not match pinned "
+                    f"Agent Portfolio GCID {expected_gcid}"
+                )
+
+            missing = sorted(
+                set(self.settings.etoro.required_real_scopes) - set(identity["scopes"])
+            )
+            if missing:
+                raise ValueError(
+                    "eToro authenticated token is missing required scopes: " + ", ".join(missing)
+                )
+        except Exception as exc:
+            self.storage.set("etoro_identity_verified", "0")
+            self.storage.set("etoro_identity_checked_at", checked_at)
+            self.storage.set("etoro_identity_error", str(exc))
+            report = self.position_manager.record_error(
+                f"eToro identity verification failed: {exc}",
+                now=current,
+            )
+            self.storage.add_event(
+                "etoro_identity_verification_failed",
+                json.dumps(
+                    {
+                        "as_of": checked_at,
+                        "state": report.state.value,
+                        "error": str(exc),
+                    }
+                ),
+            )
+            return False
+
+        self.storage.set("etoro_identity_verified", "1")
+        self.storage.set("etoro_identity_error", "")
+        self.storage.add_event(
+            "etoro_identity_verified",
+            json.dumps(
+                {
+                    "as_of": checked_at,
+                    "gcid": identity["gcid"],
+                    "real_cid": identity["real_cid"],
+                    "demo_cid": identity["demo_cid"],
+                    "scopes": sorted(identity["scopes"]),
+                }
+            ),
+        )
+        return True
 
     async def poll_once(
         self,
@@ -52,6 +128,9 @@ class ReconciliationService:
         ):
             return 0
         self._last_poll_at = current
+
+        if not await self.verify_identity_once(now=current):
+            return 0
 
         try:
             snapshot = await self.reader.snapshot(now=current)
@@ -116,9 +195,11 @@ async def run_with_reconciliation(
 
     while True:
         try:
+            # Broker identity/reconciliation is checked before external review work so
+            # the execution gate fails closed as early as possible after each interval.
+            await service.poll_once()
             await orchestrator.poll_github_once()
             orchestrator.ensure_structural_reviews()
-            await service.poll_once()
             await orchestrator.poll_market_once()
             await orchestrator.post_due_reviews()
         except Exception as exc:
@@ -127,3 +208,30 @@ async def run_with_reconciliation(
                 json.dumps({"error": repr(exc)}),
             )
         await asyncio.sleep(orchestrator.settings.poll_seconds)
+
+
+def _parse_identity(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise ValueError("eToro /me response must be an object")
+    raw_gcid = body.get("gcid")
+    if raw_gcid is None:
+        raise ValueError("eToro /me response is missing gcid")
+    raw_scopes = body.get("scopes")
+    if raw_scopes is None:
+        raw_scopes = []
+    if not isinstance(raw_scopes, list):
+        raise ValueError("eToro /me response scopes must be a list")
+    return {
+        "gcid": int(raw_gcid),
+        "real_cid": _optional_int(body.get("realCid")),
+        "demo_cid": _optional_int(body.get("demoCid")),
+        "scopes": frozenset(str(scope) for scope in raw_scopes),
+    }
+
+
+def _optional_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def _optional_text(value: Any) -> str:
+    return "" if value is None else str(value)

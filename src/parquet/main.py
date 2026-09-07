@@ -42,6 +42,11 @@ def serve(settings_path: Path | None) -> None:
         orchestrator.market_client,
     )
 
+    # Populate identity and reconciliation state before exposing /health. Failure is
+    # persisted as a blocked reconciliation state; it does not prevent diagnostics
+    # from starting.
+    asyncio.run(reconciliation.poll_once(force=True))
+
     def worker() -> None:
         asyncio.run(run_with_reconciliation(orchestrator, reconciliation))
 
