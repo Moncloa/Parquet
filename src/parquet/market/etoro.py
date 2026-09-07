@@ -205,13 +205,12 @@ class EtoroMarketDataClient:
         direct_invested = sum(_amount(position) for position in positions)
         mirror_position_invested = sum(_amount(position) for position in mirror_positions)
         mirror_available_net = sum(
-            _optional_float(mirror.get("availableAmount"), 0.0)
-            - _optional_float(mirror.get("closedPositionsNetProfit"), 0.0)
+            _float_or_zero(mirror.get("availableAmount"))
+            - _float_or_zero(mirror.get("closedPositionsNetProfit"))
             for mirror in mirrors
         )
         external_costs = sum(
-            _optional_float(item.get("totalExternalCosts"), 0.0)
-            for item in orders_for_open
+            _float_or_zero(item.get("totalExternalCosts")) for item in orders_for_open
         )
         invested = (
             direct_invested
@@ -225,8 +224,7 @@ class EtoroMarketDataClient:
         nested_unrealized = sum(_position_pnl(position) for position in positions)
         nested_unrealized += sum(_position_pnl(position) for position in mirror_positions)
         nested_unrealized += sum(
-            _optional_float(mirror.get("closedPositionsNetProfit"), 0.0)
-            for mirror in mirrors
+            _float_or_zero(mirror.get("closedPositionsNetProfit")) for mirror in mirrors
         )
         aggregate_unrealized = _optional_float(portfolio.get("unrealizedPnL"))
         unrealized = nested_unrealized if aggregate_unrealized is None else aggregate_unrealized
@@ -336,12 +334,12 @@ def _position_symbol(position: dict[str, Any]) -> str | None:
 def _position_pnl(position: dict[str, Any]) -> float:
     value = position.get("unrealizedPnL")
     if isinstance(value, dict):
-        return _optional_float(_first(value, "pnL", "pnl", "PnL"), 0.0)
-    return _optional_float(value, 0.0)
+        return _float_or_zero(_first(value, "pnL", "pnl", "PnL"))
+    return _float_or_zero(value)
 
 
 def _amount(item: dict[str, Any]) -> float:
-    return _optional_float(item.get("amount"), 0.0)
+    return _float_or_zero(item.get("amount"))
 
 
 def _mirror_id(item: dict[str, Any]) -> int:
@@ -366,7 +364,12 @@ def _optional_str(value: Any) -> str | None:
     return None if value is None else str(value)
 
 
-def _optional_float(value: Any, default: float | None = None) -> float | None:
+def _optional_float(value: Any) -> float | None:
     if value is None:
-        return default
+        return None
     return float(value)
+
+
+def _float_or_zero(value: Any) -> float:
+    parsed = _optional_float(value)
+    return 0.0 if parsed is None else parsed
