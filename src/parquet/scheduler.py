@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from functools import lru_cache
+from typing import Any
 from zoneinfo import ZoneInfo
 
-import exchange_calendars as xcals
+import exchange_calendars as xcals  # type: ignore[import-untyped]
 
 from parquet.config import StructuralReview
 
@@ -43,7 +44,7 @@ class ReviewQueue:
 
 
 @lru_cache(maxsize=16)
-def _exchange_calendar(name: str):
+def _exchange_calendar(name: str) -> Any:
     try:
         return xcals.get_calendar(name)
     except Exception as exc:
