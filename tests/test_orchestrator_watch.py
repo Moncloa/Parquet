@@ -86,7 +86,11 @@ async def test_due_review_contains_etoro_quote_context(tmp_path) -> None:
             instrument_ids={"GER40": 1001},
         ),
     )
-    client = EtoroMarketDataClient(api_key="api", user_key="user", transport=httpx.MockTransport(handler))
+    client = EtoroMarketDataClient(
+        api_key="api",
+        user_key="user",
+        transport=httpx.MockTransport(handler),
+    )
     orchestrator = Orchestrator(settings, market_client=client)
     fake_bridge = FakeBridge()
     orchestrator.bridge = fake_bridge  # type: ignore[assignment]
@@ -135,7 +139,11 @@ async def test_market_poll_evaluates_active_watch(tmp_path) -> None:
             instrument_ids={"NSDQ100": 1002},
         ),
     )
-    client = EtoroMarketDataClient(api_key="api", user_key="user", transport=httpx.MockTransport(handler))
+    client = EtoroMarketDataClient(
+        api_key="api",
+        user_key="user",
+        transport=httpx.MockTransport(handler),
+    )
     orchestrator = Orchestrator(settings, market_client=client)
     orchestrator.process_analysis(
         MarketAnalysis(
