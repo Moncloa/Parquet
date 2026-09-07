@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -71,7 +71,7 @@ class AutonomousExecutionCoordinator:
         self.position_manager.assert_trading_enabled(now=current)
         existing = self.storage.get_active_execution_attempt_for_proposal(proposal.proposal_id)
         if existing is not None:
-            return existing
+            return cast(ExecutionAttempt, existing)
 
         attempt = ExecutionAttempt(
             attempt_id=str(uuid4()),
