@@ -15,7 +15,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/parquet
+ReadWritePaths=/var/lib/parquet /var/lib/parquet-exchange
 ReadOnlyPaths=/etc/parquet
 
 [Install]
