@@ -176,9 +176,7 @@ class EtoroExecutionClient:
 
         if response.is_error:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
-        body = response.json()
-        if not isinstance(body, dict):
-            raise EtoroExecutionError(response.status_code, "non-object identity response", request_id)
+        body = _json_object(response, request_id, "identity")
 
         raw_gcid = body.get("gcid")
         if raw_gcid is None:
@@ -199,8 +197,9 @@ class EtoroExecutionClient:
         amount_usd: float,
         stop_loss_rate: float,
         take_profit_rate: float | None = None,
+        request_id: str | None = None,
     ) -> EtoroOrderResult:
-        request_id = str(uuid4())
+        submission_request_id = request_id or str(uuid4())
         payload = market_order_payload(
             transaction=transaction,
             instrument_id=instrument_id,
@@ -212,19 +211,25 @@ class EtoroExecutionClient:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
                 response = await client.post(
                     f"{self.base_url}/trading/execution/orders",
-                    headers=self._headers(request_id, json_body=True),
+                    headers=self._headers(submission_request_id, json_body=True),
                     json=payload,
                 )
         except httpx.RequestError as exc:
-            raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+            raise EtoroExecutionTransportError(repr(exc), submission_request_id) from exc
 
         if response.is_error:
-            raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
+            raise EtoroExecutionError(
+                response.status_code,
+                response.text[:1000],
+                submission_request_id,
+            )
 
-        body = response.json()
-        if not isinstance(body, dict):
-            raise EtoroExecutionError(response.status_code, "non-object response", request_id)
-        return EtoroOrderResult(request_id=request_id, payload=payload, response=body)
+        body = _json_object(response, submission_request_id, "order")
+        return EtoroOrderResult(
+            request_id=submission_request_id,
+            payload=payload,
+            response=body,
+        )
 
     async def lookup_order(
         self,
@@ -253,9 +258,7 @@ class EtoroExecutionClient:
 
         if response.is_error:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
-        body = response.json()
-        if not isinstance(body, dict):
-            raise EtoroExecutionError(response.status_code, "non-object lookup response", request_id)
+        body = _json_object(response, request_id, "lookup")
         return EtoroOrderLookupResult(request_id=request_id, response=body)
 
     async def open_market_buy(
@@ -265,6 +268,7 @@ class EtoroExecutionClient:
         amount_usd: float,
         stop_loss_rate: float,
         take_profit_rate: float | None = None,
+        request_id: str | None = None,
     ) -> EtoroOrderResult:
         return await self.open_market_order(
             transaction="buy",
@@ -272,6 +276,7 @@ class EtoroExecutionClient:
             amount_usd=amount_usd,
             stop_loss_rate=stop_loss_rate,
             take_profit_rate=take_profit_rate,
+            request_id=request_id,
         )
 
 
@@ -282,6 +287,24 @@ def _normalize_open_transaction(transaction: str) -> str:
     if normalized in {"sell", "sellshort", "short"}:
         return "sellShort"
     raise ValueError("transaction must describe an opening long or short")
+
+
+def _json_object(response: httpx.Response, request_id: str, label: str) -> dict[str, Any]:
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise EtoroExecutionError(
+            response.status_code,
+            f"invalid JSON {label} response",
+            request_id,
+        ) from exc
+    if not isinstance(body, dict):
+        raise EtoroExecutionError(
+            response.status_code,
+            f"non-object {label} response",
+            request_id,
+        )
+    return body
 
 
 def _extract_id(response: dict[str, Any], *keys: str) -> str | None:
