@@ -44,6 +44,34 @@ async def test_rates_parse_official_shape_and_send_auth_headers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rates_parse_current_etoro_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "rates": [
+                    {
+                        "instrumentID": 32,
+                        "ask": 25977.05,
+                        "bid": 25976.35,
+                        "lastExecution": 25976.35,
+                        "date": "2026-09-07T09:28:45.8547207Z",
+                    }
+                ]
+            },
+        )
+
+    client = EtoroMarketDataClient(api_key="api", transport=httpx.MockTransport(handler))
+    rates = await client.rates([32])
+    assert len(rates) == 1
+    assert rates[0].instrument_id == 32
+    assert rates[0].bid == 25976.35
+    assert rates[0].ask == 25977.05
+    assert rates[0].last_price == 25976.35
+    assert rates[0].timestamp == datetime(2026, 9, 7, 9, 28, 45, 854720, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
 async def test_search_uses_exact_symbol_without_fields_projection() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params["internalSymbolFull"] == "TSLA"
