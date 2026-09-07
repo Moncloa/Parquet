@@ -9,7 +9,7 @@ import uvicorn
 
 from parquet.api import create_app
 from parquet.autonomous_orchestrator import AutonomousOrchestrator
-from parquet.config import load_settings
+from parquet.config import Settings, load_settings
 from parquet.execution.etoro import EtoroExecutionClient
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.reconciliation import ReconciliationService, run_with_reconciliation
@@ -49,7 +49,7 @@ def serve(settings_path: Path | None) -> None:
     uvicorn.run(create_app(settings, orchestrator), host=settings.host, port=settings.port)
 
 
-def _execution_client(settings_path: Path | None) -> tuple[object, EtoroExecutionClient]:
+def _execution_client(settings_path: Path | None) -> tuple[Settings, EtoroExecutionClient]:
     settings = load_settings(settings_path)
     client = EtoroExecutionClient(
         api_key=_read_secret(settings.etoro.api_key_file, "eToro API key"),
