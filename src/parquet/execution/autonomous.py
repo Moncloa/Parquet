@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -41,14 +42,9 @@ class ExecutionAttempt(BaseModel):
 
 
 class AutonomousExecutionCoordinator:
-    """Transactional autonomous-execution coordinator.
+    """Transactional autonomous-execution coordinator for shadow/demo validation."""
 
-    This coordinator intentionally supports SHADOW and DEMO preparation only.
-    Real-money broker writes are not performed here. The same durable ledger and
-    reconciliation gates can therefore be validated without financial side effects.
-    """
-
-    def __init__(self, storage: object, position_manager: PositionManager) -> None:
+    def __init__(self, storage: Any, position_manager: PositionManager) -> None:
         self.storage = storage
         self.position_manager = position_manager
 
@@ -62,6 +58,7 @@ class AutonomousExecutionCoordinator:
         now: datetime | None = None,
     ) -> ExecutionAttempt:
         current = (now or datetime.now(UTC)).astimezone(UTC)
+        self.assert_no_uncertain_execution()
         if not decision.approved:
             raise RuntimeError("Cannot prepare rejected execution decision")
         if decision.amount_usd is None or decision.amount_usd <= 0:
@@ -93,12 +90,26 @@ class AutonomousExecutionCoordinator:
         self.storage.save_execution_attempt(attempt)
         return attempt
 
-    def execute_shadow(self, attempt: ExecutionAttempt, *, now: datetime | None = None) -> ExecutionAttempt:
+    def execute_shadow(
+        self, attempt: ExecutionAttempt, *, now: datetime | None = None
+    ) -> ExecutionAttempt:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         if attempt.state != ExecutionAttemptState.PREPARED:
             raise RuntimeError(f"Execution attempt is not PREPARED: {attempt.state}")
         updated = attempt.model_copy(
             update={"state": ExecutionAttemptState.SHADOW_EXECUTED, "updated_at": current}
+        )
+        self.storage.save_execution_attempt(updated)
+        return updated
+
+    def mark_demo_pending(
+        self, attempt: ExecutionAttempt, *, now: datetime | None = None
+    ) -> ExecutionAttempt:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        if attempt.state != ExecutionAttemptState.PREPARED:
+            raise RuntimeError(f"Execution attempt is not PREPARED: {attempt.state}")
+        updated = attempt.model_copy(
+            update={"state": ExecutionAttemptState.DEMO_PENDING, "updated_at": current}
         )
         self.storage.save_execution_attempt(updated)
         return updated
@@ -123,6 +134,9 @@ class AutonomousExecutionCoordinator:
         self.storage.save_execution_attempt(updated)
         self.storage.set("execution_uncertain", "1")
         return updated
+
+    def resolve_uncertain_execution(self) -> None:
+        self.storage.set("execution_uncertain", "0")
 
     def assert_no_uncertain_execution(self) -> None:
         if self.storage.get("execution_uncertain") == "1":
