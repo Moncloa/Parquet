@@ -7,7 +7,7 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.5.0")
+    app = FastAPI(title="Parquet", version="0.5.1")
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -31,6 +31,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "watch_symbols": sorted({watch.symbol for watch in active_watches}),
             "risk_snapshot_available": risk_snapshot is not None,
             "risk_snapshot_as_of": None if risk_snapshot is None else risk_snapshot.as_of,
+            "risk_equity_usd": None if risk_snapshot is None else risk_snapshot.equity_usd,
+            "risk_open_positions": None if risk_snapshot is None else risk_snapshot.open_positions,
             "pending_reviews": [
                 {
                     "at": review.at.isoformat(),

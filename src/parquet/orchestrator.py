@@ -14,6 +14,7 @@ from parquet.models import (
     MarketAnalysis,
     MarketObservation,
     ReviewRequest,
+    RiskSnapshot,
     TriggerAction,
     WatchEvent,
     WatchEventType,
@@ -51,6 +52,7 @@ class Orchestrator:
             symbol.upper(): instrument_id
             for symbol, instrument_id in settings.etoro.instrument_ids.items()
         }
+        self._last_account_poll_at: datetime | None = None
         self.ensure_structural_reviews()
 
     def _build_market_client(self) -> EtoroMarketDataClient | None:
@@ -187,6 +189,69 @@ class Orchestrator:
         self.storage.set("github_last_comment_id", str(last_id))
         return processed
 
+    async def poll_account_once(
+        self,
+        now: datetime | None = None,
+        *,
+        force: bool = False,
+    ) -> int:
+        if self.market_client is None:
+            return 0
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        if (
+            not force
+            and self._last_account_poll_at is not None
+            and (current - self._last_account_poll_at).total_seconds()
+            < self.settings.etoro.account_poll_seconds
+        ):
+            return 0
+
+        self._last_account_poll_at = current
+        try:
+            account = await self.market_client.account_snapshot(now=current)
+            if account.equity_usd <= 0:
+                raise ValueError("eToro equity must be positive for execution sizing")
+        except Exception as exc:
+            self.storage.add_event("account_snapshot_error", json.dumps({"error": repr(exc)}))
+            return 0
+
+        reverse_ids = {
+            instrument_id: symbol
+            for symbol, instrument_id in self._instrument_ids.items()
+        }
+        open_symbols = set(account.open_symbols)
+        for instrument_id in account.open_instrument_ids:
+            symbol = reverse_ids.get(instrument_id)
+            if symbol is not None:
+                open_symbols.add(symbol)
+
+        previous = self.storage.get_risk_snapshot()
+        snapshot = RiskSnapshot(
+            as_of=account.captured_at,
+            equity_usd=account.equity_usd,
+            open_positions=account.open_positions,
+            trades_today=0 if previous is None else previous.trades_today,
+            daily_pnl_pct=0.0 if previous is None else previous.daily_pnl_pct,
+            weekly_pnl_pct=0.0 if previous is None else previous.weekly_pnl_pct,
+            open_symbols=sorted(open_symbols),
+            open_instrument_ids=account.open_instrument_ids,
+        )
+        self.storage.set_risk_snapshot(snapshot)
+        self.storage.set(
+            "account_snapshot_components",
+            json.dumps(
+                {
+                    "as_of": account.captured_at.isoformat(),
+                    "equity_usd": account.equity_usd,
+                    "available_cash_usd": account.available_cash_usd,
+                    "invested_usd": account.invested_usd,
+                    "unrealized_pnl_usd": account.unrealized_pnl_usd,
+                    "open_positions": account.open_positions,
+                }
+            ),
+        )
+        return 1
+
     async def _resolve_instrument_ids(self, symbols: list[str]) -> dict[str, int]:
         if self.market_client is None:
             return {}
@@ -287,6 +352,7 @@ class Orchestrator:
                 symbol=symbol,
                 price=price,
                 observed_at=rate.timestamp,
+                instrument_id=rate.instrument_id,
                 bid=rate.bid,
                 ask=rate.ask,
             )
@@ -339,6 +405,7 @@ class Orchestrator:
             try:
                 await self.poll_github_once()
                 self.ensure_structural_reviews()
+                await self.poll_account_once()
                 await self.poll_market_once()
                 await self.post_due_reviews()
             except Exception as exc:

@@ -20,6 +20,7 @@ etoro:
   user_key_file: /etc/parquet/etoro_user_key
   base_url: https://public-api.etoro.com/api/v1
   max_quote_age_seconds: 120
+  account_poll_seconds: 60
   review_symbols:
     - GER40
     - NSDQ100

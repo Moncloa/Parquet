@@ -66,11 +66,16 @@ class ExecutionGate:
         if snapshot.equity_usd is None:
             reasons.append("equity_unavailable")
 
-        if (
-            not self.risk.allow_duplicate_symbol_positions
-            and proposal.symbol.upper() in {symbol.upper() for symbol in snapshot.open_symbols}
-        ):
-            reasons.append("duplicate_symbol_position")
+        if not self.risk.allow_duplicate_symbol_positions:
+            duplicate_symbol = proposal.symbol.upper() in {
+                symbol.upper() for symbol in snapshot.open_symbols
+            }
+            duplicate_instrument = (
+                observation.instrument_id is not None
+                and observation.instrument_id in snapshot.open_instrument_ids
+            )
+            if duplicate_symbol or duplicate_instrument:
+                reasons.append("duplicate_symbol_position")
 
         execution_price: float | None = None
         spread_bps: float | None = None

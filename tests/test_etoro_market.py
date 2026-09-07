@@ -111,6 +111,89 @@ async def test_search_keeps_legacy_data_shape_compatible() -> None:
 
 
 @pytest.mark.asyncio
+async def test_account_snapshot_matches_empty_real_pnl_shape() -> None:
+    now = datetime(2026, 9, 7, 11, 42, tzinfo=UTC)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/trading/info/real/pnl")
+        return httpx.Response(
+            200,
+            json={
+                "clientPortfolio": {
+                    "positions": [],
+                    "unrealizedPnL": 0.0,
+                    "mirrors": [],
+                    "accountCurrencyId": 1,
+                    "credit": 10000.0,
+                    "orders": [],
+                    "stockOrders": [],
+                    "entryOrders": [],
+                    "exitOrders": [],
+                    "ordersForOpen": [],
+                    "ordersForClose": [],
+                    "ordersForCloseMultiple": [],
+                    "bonusCredit": 0.0,
+                }
+            },
+        )
+
+    client = EtoroMarketDataClient(
+        api_key="api",
+        user_key="user",
+        transport=httpx.MockTransport(handler),
+    )
+    snapshot = await client.account_snapshot(now=now)
+
+    assert snapshot.equity_usd == 10000.0
+    assert snapshot.available_cash_usd == 10000.0
+    assert snapshot.invested_usd == 0.0
+    assert snapshot.unrealized_pnl_usd == 0.0
+    assert snapshot.open_positions == 0
+    assert snapshot.open_instrument_ids == []
+
+
+@pytest.mark.asyncio
+async def test_account_snapshot_uses_official_equity_components() -> None:
+    now = datetime(2026, 9, 7, 11, 42, tzinfo=UTC)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "clientPortfolio": {
+                    "positions": [
+                        {
+                            "instrumentID": 32,
+                            "symbol": "GER40",
+                            "amount": 1000.0,
+                            "unrealizedPnL": {"pnL": 50.0},
+                        }
+                    ],
+                    "unrealizedPnL": 50.0,
+                    "mirrors": [],
+                    "accountCurrencyId": 1,
+                    "credit": 10000.0,
+                    "orders": [{"amount": 100.0}],
+                    "ordersForOpen": [
+                        {"mirrorID": 0, "amount": 500.0, "totalExternalCosts": 2.0}
+                    ],
+                }
+            },
+        )
+
+    client = EtoroMarketDataClient(api_key="api", transport=httpx.MockTransport(handler))
+    snapshot = await client.account_snapshot(now=now)
+
+    assert snapshot.available_cash_usd == 9400.0
+    assert snapshot.invested_usd == 1602.0
+    assert snapshot.unrealized_pnl_usd == 50.0
+    assert snapshot.equity_usd == 11052.0
+    assert snapshot.open_positions == 1
+    assert snapshot.open_instrument_ids == [32]
+    assert snapshot.open_symbols == ["GER40"]
+
+
+@pytest.mark.asyncio
 async def test_429_exposes_retry_after() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers={"Retry-After": "7"}, text="slow down")
