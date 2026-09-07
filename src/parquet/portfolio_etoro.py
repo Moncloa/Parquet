@@ -29,11 +29,7 @@ class EtoroPortfolioReader:
             for mirror in mirrors
             for position in _dict_list(mirror.get("positions"))
         ]
-        positions = [
-            parsed
-            for item in [*direct_positions, *mirror_positions]
-            if (parsed := _parse_position(item)) is not None
-        ]
+        positions = _parse_positions([*direct_positions, *mirror_positions])
 
         raw_orders = _dict_list(portfolio.get("orders"))
         raw_orders_for_open = [
@@ -41,14 +37,8 @@ class EtoroPortfolioReader:
             for item in _dict_list(portfolio.get("ordersForOpen"))
             if _mirror_id(item) == 0
         ]
-        orders = [
-            parsed for item in raw_orders if (parsed := _parse_order(item)) is not None
-        ]
-        orders_for_open = [
-            parsed
-            for item in raw_orders_for_open
-            if (parsed := _parse_order(item)) is not None
-        ]
+        orders = _parse_orders(raw_orders)
+        orders_for_open = _parse_orders(raw_orders_for_open)
 
         credit = _required_float(portfolio.get("credit"), "clientPortfolio.credit")
         open_order_amount = sum(_amount(item) for item in raw_orders_for_open)
@@ -97,6 +87,24 @@ class EtoroPortfolioReader:
             orders=orders,
             orders_for_open=orders_for_open,
         )
+
+
+def _parse_positions(items: list[dict[str, Any]]) -> list[BrokerPosition]:
+    result: list[BrokerPosition] = []
+    for item in items:
+        position = _parse_position(item)
+        if position is not None:
+            result.append(position)
+    return result
+
+
+def _parse_orders(items: list[dict[str, Any]]) -> list[BrokerOrder]:
+    result: list[BrokerOrder] = []
+    for item in items:
+        order = _parse_order(item)
+        if order is not None:
+            result.append(order)
+    return result
 
 
 def _parse_position(item: dict[str, Any]) -> BrokerPosition | None:
