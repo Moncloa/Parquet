@@ -14,6 +14,7 @@ from parquet.config import Settings, load_settings
 from parquet.execution.etoro import EtoroExecutionClient
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.reconciliation import ReconciliationService, run_with_reconciliation
+from parquet.scheduler import ScheduledReview
 from parquet.storage import Storage
 from parquet.tickets import prepare_real_small_ticket, recent_proposals
 
@@ -119,6 +120,58 @@ def run_proposals(settings_path: Path | None, limit: int) -> int:
     return 0
 
 
+def run_request_review_now(settings_path: Path | None, reason: str) -> int:
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise RuntimeError("Manual review reason must not be empty")
+
+    settings = load_settings(settings_path)
+    orchestrator = AutonomousOrchestrator(settings)
+    if orchestrator.bridge is None:
+        raise RuntimeError("Cannot request review now: GitHub bridge is disabled")
+
+    reconciliation = ReconciliationService(
+        settings,
+        orchestrator.storage,
+        orchestrator.market_client,
+    )
+
+    async def request() -> tuple[int, datetime]:
+        await reconciliation.poll_once(force=True)
+        report = orchestrator.storage.get_reconciliation_report()
+        if report is None or not report.trading_enabled:
+            state = None if report is None else report.state.value
+            raise RuntimeError(
+                f"Cannot request review now: broker reconciliation is not ready ({state})"
+            )
+        if orchestrator.storage.get("etoro_identity_verified") != "1":
+            raise RuntimeError("Cannot request review now: eToro identity is not verified")
+
+        current = datetime.now(UTC)
+        orchestrator.add_review(
+            ScheduledReview(
+                at=current,
+                reason=normalized_reason,
+                source="manual",
+            )
+        )
+        posted = await orchestrator.post_due_reviews(now=current)
+        return posted, current
+
+    posted, requested_at = asyncio.run(request())
+    if posted != 1:
+        raise RuntimeError(f"Expected one manual review request to be posted, got {posted}")
+
+    print("Manual review request posted")
+    print(f"  reason: {normalized_reason}")
+    print(f"  requested_at: {requested_at.isoformat()}")
+    print(f"  repository: {settings.github.repository}")
+    print(f"  runtime_pr: {settings.github.runtime_pr}")
+    print("Current eToro market context and risk snapshot were attached.")
+    print("No broker order was sent.")
+    return 0
+
+
 def run_prepare_real_small(
     settings_path: Path | None,
     proposal_id: str,
@@ -209,6 +262,13 @@ def main() -> None:
     proposals = sub.add_parser("proposals")
     proposals.add_argument("--limit", type=int, default=20)
 
+    request_review_now = sub.add_parser("request-review-now")
+    request_review_now.add_argument(
+        "--reason",
+        default="manual_opportunity_scan",
+        help="Reason recorded in the Parquet review request",
+    )
+
     prepare_real_small = sub.add_parser("prepare-real-small")
     prepare_real_small.add_argument("proposal_id")
     prepare_real_small.add_argument("--amount", type=float, default=None)
@@ -226,6 +286,8 @@ def main() -> None:
         raise SystemExit(run_etoro_check(args.config))
     if args.command == "proposals":
         raise SystemExit(run_proposals(args.config, int(args.limit)))
+    if args.command == "request-review-now":
+        raise SystemExit(run_request_review_now(args.config, str(args.reason)))
     if args.command == "prepare-real-small":
         amount = None if args.amount is None else float(args.amount)
         raise SystemExit(
