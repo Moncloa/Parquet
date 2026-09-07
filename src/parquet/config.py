@@ -26,6 +26,15 @@ class EtoroConfig(BaseModel):
     user_key_file: Path = Path("/etc/parquet/etoro_user_key")
     base_url: str = "https://public-api.etoro.com/api/v1"
     execution_base_url: str = "https://public-api.etoro.com/api/v2"
+    expected_gcid: int | None = Field(default=None, gt=0)
+    required_real_scopes: list[str] = Field(
+        default_factory=lambda: [
+            "etoro-public:real:read",
+            "etoro-public:real:write",
+            "etoro-public:trade.real:read",
+            "etoro-public:trade.real:write",
+        ]
+    )
     review_symbols: list[str] = Field(
         default_factory=lambda: [
             "GER40",
@@ -49,6 +58,8 @@ class ExecutionConfig(BaseModel):
     autonomous_mode: str = "shadow"
     supervised_real_enabled: bool = False
     supervised_real_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
+    broker_lookup_attempts: int = Field(default=10, ge=1, le=60)
+    broker_lookup_interval_seconds: float = Field(default=0.5, ge=0.0, le=5.0)
 
     @model_validator(mode="after")
     def validate_autonomous_mode(self) -> ExecutionConfig:
