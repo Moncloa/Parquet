@@ -148,8 +148,6 @@ class PositionManager:
                 )
             )
 
-        # A locally-managed position disappearing at the broker normally means it
-        # was closed by SL/TP/manual broker-side protection. Broker is authoritative.
         for broker_id in sorted(set(local_positions) - set(broker_positions)):
             self.storage.set_managed_position_status(
                 local_positions[broker_id].local_id,
@@ -174,6 +172,28 @@ class PositionManager:
             issues=issues,
         )
         self.storage.set_broker_portfolio_snapshot(snapshot)
+        self.storage.set_reconciliation_report(report)
+        return report
+
+    def record_error(
+        self,
+        error: Exception | str,
+        *,
+        now: datetime | None = None,
+    ) -> ReconciliationReport:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        detail = repr(error) if isinstance(error, Exception) else str(error)
+        report = ReconciliationReport(
+            as_of=current,
+            state=ReconciliationState.ERROR,
+            trading_enabled=False,
+            issues=[
+                ReconciliationIssue(
+                    code="BROKER_RECONCILIATION_ERROR",
+                    detail=detail,
+                )
+            ],
+        )
         self.storage.set_reconciliation_report(report)
         return report
 
