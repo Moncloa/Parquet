@@ -17,12 +17,17 @@ from parquet.reconciliation import ReconciliationService, run_with_reconciliatio
 
 def validate_keys(settings_path: Path | None) -> int:
     settings = load_settings(settings_path)
-    key_paths = (settings.keys.private_key, settings.keys.public_key)
+    key_paths = [settings.keys.private_key, settings.keys.public_key]
+    if settings.etoro.enabled:
+        key_paths.extend([settings.etoro.api_key_file, settings.etoro.user_key_file])
     missing = [path for path in key_paths if not path.exists()]
     if missing:
         print("Missing key files:")
         for path in missing:
             print(f"  - {path}")
+        return 2
+    if settings.execution.supervised_real_enabled and settings.etoro.expected_gcid is None:
+        print("Invalid configuration: supervised real execution requires etoro.expected_gcid")
         return 2
     print("Configuration and key paths are valid")
     return 0
@@ -42,6 +47,46 @@ def serve(settings_path: Path | None) -> None:
 
     threading.Thread(target=worker, name="parquet-orchestrator", daemon=True).start()
     uvicorn.run(create_app(settings, orchestrator), host=settings.host, port=settings.port)
+
+
+def _execution_client(settings_path: Path | None) -> tuple[object, EtoroExecutionClient]:
+    settings = load_settings(settings_path)
+    client = EtoroExecutionClient(
+        api_key=_read_secret(settings.etoro.api_key_file, "eToro API key"),
+        user_key=_read_secret(settings.etoro.user_key_file, "eToro User key"),
+        base_url=settings.etoro.execution_base_url,
+        identity_base_url=settings.etoro.base_url,
+    )
+    return settings, client
+
+
+def run_etoro_check(settings_path: Path | None) -> int:
+    settings, client = _execution_client(settings_path)
+    identity = asyncio.run(client.identity())
+
+    print("eToro authenticated identity")
+    print(f"  gcid: {identity.gcid}")
+    print(f"  real_cid: {identity.real_cid}")
+    print(f"  demo_cid: {identity.demo_cid}")
+    print("  scopes:")
+    for scope in sorted(identity.scopes):
+        print(f"    - {scope}")
+
+    expected_gcid = settings.etoro.expected_gcid
+    if expected_gcid is None:
+        print("FAIL: etoro.expected_gcid is not configured")
+        return 3
+    if identity.gcid != expected_gcid:
+        print(f"FAIL: authenticated GCID {identity.gcid} != expected {expected_gcid}")
+        return 4
+    missing = sorted(set(settings.etoro.required_real_scopes) - set(identity.scopes))
+    if missing:
+        print("FAIL: missing required scopes:")
+        for scope in missing:
+            print(f"  - {scope}")
+        return 5
+    print("OK: Agent Portfolio identity and scopes match configuration")
+    return 0
 
 
 def run_real_small(settings_path: Path | None, attempt_id: str) -> int:
@@ -67,12 +112,7 @@ def run_real_small(settings_path: Path | None, attempt_id: str) -> int:
         orchestrator.storage,
         orchestrator.market_client,
     )
-    client = EtoroExecutionClient(
-        api_key=_read_secret(settings.etoro.api_key_file, "eToro API key"),
-        user_key=_read_secret(settings.etoro.user_key_file, "eToro User key"),
-        base_url=settings.etoro.execution_base_url,
-        identity_base_url=settings.etoro.base_url,
-    )
+    _, client = _execution_client(settings_path)
     adapter = RealSmallExecutionAdapter(
         settings=settings,
         storage=orchestrator.storage,
@@ -96,6 +136,7 @@ def main() -> None:
     sub.add_parser("serve")
     sub.add_parser("validate")
     sub.add_parser("once")
+    sub.add_parser("etoro-check")
     real_small = sub.add_parser("real-small")
     real_small.add_argument("attempt_id")
     args = parser.parse_args()
@@ -105,6 +146,8 @@ def main() -> None:
     if args.command == "serve":
         serve(args.config)
         return
+    if args.command == "etoro-check":
+        raise SystemExit(run_etoro_check(args.config))
     if args.command == "real-small":
         raise SystemExit(run_real_small(args.config, str(args.attempt_id)))
     if args.command == "once":
