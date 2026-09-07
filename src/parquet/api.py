@@ -7,7 +7,7 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.5.2")
+    app = FastAPI(title="Parquet", version="0.6.0")
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -18,6 +18,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro": settings.etoro.enabled,
             "execution_gate": True,
             "broker_execution": False,
+            "live_test_execution": settings.execution.live_test_enabled,
         }
 
     @app.get("/status")
@@ -33,6 +34,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "risk_snapshot_as_of": None if risk_snapshot is None else risk_snapshot.as_of,
             "risk_equity_usd": None if risk_snapshot is None else risk_snapshot.equity_usd,
             "risk_open_positions": None if risk_snapshot is None else risk_snapshot.open_positions,
+            "live_test_execution": settings.execution.live_test_enabled,
+            "live_test_max_amount_usd": settings.execution.live_test_max_amount_usd,
             "pending_reviews": [
                 {
                     "at": review.at.isoformat(),
