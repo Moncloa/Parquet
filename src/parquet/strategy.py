@@ -20,7 +20,7 @@ from parquet.models import MarketAnalysis, ReviewRequest, TriggerAction
 from parquet.storage import Storage
 
 _SECRET_PATTERNS = (
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
     re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~-]{20,}"),
 )
