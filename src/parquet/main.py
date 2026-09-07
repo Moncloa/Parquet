@@ -10,6 +10,8 @@ import uvicorn
 from parquet.api import create_app
 from parquet.autonomous_orchestrator import AutonomousOrchestrator
 from parquet.config import load_settings
+from parquet.execution.etoro import EtoroExecutionClient
+from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.reconciliation import ReconciliationService, run_with_reconciliation
 
 
@@ -42,6 +44,50 @@ def serve(settings_path: Path | None) -> None:
     uvicorn.run(create_app(settings, orchestrator), host=settings.host, port=settings.port)
 
 
+def run_real_small(settings_path: Path | None, attempt_id: str) -> int:
+    settings = load_settings(settings_path)
+    orchestrator = AutonomousOrchestrator(settings)
+    attempt = orchestrator.storage.get_execution_attempt(attempt_id)
+    if attempt is None:
+        print(f"Execution attempt not found: {attempt_id}")
+        return 2
+
+    print("Supervised real-money execution ticket")
+    print(f"  attempt: {attempt.attempt_id}")
+    print(f"  symbol: {attempt.symbol}")
+    print(f"  side: {attempt.side}")
+    print(f"  amount_usd: {attempt.amount_usd:.2f}")
+    print(f"  stop_loss: {attempt.stop_loss}")
+    print(f"  take_profit: {attempt.take_profit}")
+    expected = f"REAL {attempt.attempt_id}"
+    confirmation = input(f"Type exactly '{expected}' to submit: ").strip()
+
+    reconciliation = ReconciliationService(
+        settings,
+        orchestrator.storage,
+        orchestrator.market_client,
+    )
+    client = EtoroExecutionClient(
+        api_key=_read_secret(settings.etoro.api_key_file, "eToro API key"),
+        user_key=_read_secret(settings.etoro.user_key_file, "eToro User key"),
+        base_url=settings.etoro.execution_base_url,
+    )
+    adapter = RealSmallExecutionAdapter(
+        settings=settings,
+        storage=orchestrator.storage,
+        position_manager=reconciliation.position_manager,
+        reconciliation=reconciliation,
+        client=client,
+    )
+    result = asyncio.run(adapter.execute(attempt, confirmation=confirmation))
+    print(
+        f"Execution attempt {result.attempt_id}: {result.state.value}; "
+        f"request={result.broker_request_id}; order={result.broker_order_id}; "
+        f"position={result.broker_position_id}"
+    )
+    return 0 if result.state.value == "RECONCILED" else 3
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="parquet")
     parser.add_argument("--config", type=Path, default=None)
@@ -49,6 +95,8 @@ def main() -> None:
     sub.add_parser("serve")
     sub.add_parser("validate")
     sub.add_parser("once")
+    real_small = sub.add_parser("real-small")
+    real_small.add_argument("attempt_id")
     args = parser.parse_args()
 
     if args.command == "validate":
@@ -56,6 +104,8 @@ def main() -> None:
     if args.command == "serve":
         serve(args.config)
         return
+    if args.command == "real-small":
+        raise SystemExit(run_real_small(args.config, str(args.attempt_id)))
     if args.command == "once":
         settings = load_settings(args.config)
         orchestrator = AutonomousOrchestrator(settings)
@@ -76,3 +126,13 @@ def main() -> None:
             f"processed {processed} new analysis comment(s)"
         )
         return
+
+
+def _read_secret(path: Path, label: str) -> str:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Missing {label} file: {path}") from exc
+    if not value:
+        raise RuntimeError(f"Empty {label} file: {path}")
+    return value
