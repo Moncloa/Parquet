@@ -11,7 +11,7 @@ keys:
 github:
   enabled: false
   repository: Moncloa/Parquet
-  runtime_pr: 1
+  runtime_pr: 2
   token_file: /etc/parquet/github_token
 
 risk:
