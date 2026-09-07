@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
 
 from parquet.autonomous_orchestrator import AutonomousOrchestrator
 from parquet.config import Settings
@@ -47,6 +46,50 @@ def recent_proposals(storage: Storage, *, limit: int = 20) -> list[ProposalRecor
     ]
 
 
+def choose_real_small_amount(
+    *,
+    gate_maximum_usd: float,
+    supervised_cap_usd: float,
+    broker_minimum_usd: float | None,
+    requested_amount_usd: float | None = None,
+) -> tuple[float, float]:
+    if gate_maximum_usd <= 0 or supervised_cap_usd <= 0:
+        raise RuntimeError("No positive amount remains after supervised and risk caps")
+    maximum_safe = min(gate_maximum_usd, supervised_cap_usd)
+
+    if broker_minimum_usd is not None:
+        if broker_minimum_usd <= 0:
+            raise RuntimeError("eToro returned a non-positive minimum position amount")
+        if broker_minimum_usd > maximum_safe:
+            raise RuntimeError(
+                f"eToro minimum {broker_minimum_usd:.2f} USD exceeds the safe supervised "
+                f"maximum {maximum_safe:.2f} USD for this proposal"
+            )
+
+    if requested_amount_usd is None:
+        chosen_amount = (
+            broker_minimum_usd
+            if broker_minimum_usd is not None
+            else min(10.0, maximum_safe)
+        )
+    else:
+        if requested_amount_usd <= 0:
+            raise RuntimeError("Requested amount must be positive")
+        chosen_amount = requested_amount_usd
+
+    if broker_minimum_usd is not None and chosen_amount < broker_minimum_usd:
+        raise RuntimeError(
+            f"Requested amount {chosen_amount:.2f} USD is below eToro minimum "
+            f"{broker_minimum_usd:.2f} USD"
+        )
+    if chosen_amount > maximum_safe:
+        raise RuntimeError(
+            f"Requested amount {chosen_amount:.2f} USD exceeds safe maximum "
+            f"{maximum_safe:.2f} USD"
+        )
+    return chosen_amount, maximum_safe
+
+
 async def prepare_real_small_ticket(
     settings: Settings,
     *,
@@ -57,8 +100,6 @@ async def prepare_real_small_ticket(
         raise RuntimeError("eToro is disabled")
     if settings.etoro.expected_gcid is None:
         raise RuntimeError("Cannot prepare real ticket: Agent Portfolio GCID is not pinned")
-    if requested_amount_usd is not None and requested_amount_usd <= 0:
-        raise RuntimeError("Requested amount must be positive")
 
     orchestrator = AutonomousOrchestrator(settings)
     reconciliation = ReconciliationService(
@@ -106,34 +147,12 @@ async def prepare_real_small_ticket(
 
     direction = "LONG" if proposal.side == Side.BUY else "SHORT"
     broker_minimum = eligibility.minimum_amount(direction=direction, leverage=1)
-    maximum_safe = min(
-        decision.amount_usd,
-        settings.execution.supervised_real_max_amount_usd,
+    chosen_amount, maximum_safe = choose_real_small_amount(
+        gate_maximum_usd=decision.amount_usd,
+        supervised_cap_usd=settings.execution.supervised_real_max_amount_usd,
+        broker_minimum_usd=broker_minimum,
+        requested_amount_usd=requested_amount_usd,
     )
-    if maximum_safe <= 0:
-        raise RuntimeError("No positive amount remains after supervised and risk caps")
-
-    if broker_minimum is not None and broker_minimum > maximum_safe:
-        raise RuntimeError(
-            f"eToro minimum {broker_minimum:.2f} USD exceeds the safe supervised maximum "
-            f"{maximum_safe:.2f} USD for this proposal"
-        )
-
-    if requested_amount_usd is None:
-        chosen_amount = broker_minimum if broker_minimum is not None else min(10.0, maximum_safe)
-    else:
-        chosen_amount = requested_amount_usd
-
-    if broker_minimum is not None and chosen_amount < broker_minimum:
-        raise RuntimeError(
-            f"Requested amount {chosen_amount:.2f} USD is below eToro minimum "
-            f"{broker_minimum:.2f} USD"
-        )
-    if chosen_amount > maximum_safe:
-        raise RuntimeError(
-            f"Requested amount {chosen_amount:.2f} USD exceeds safe maximum "
-            f"{maximum_safe:.2f} USD"
-        )
 
     capped_decision = replace(decision, amount_usd=chosen_amount)
     attempt = orchestrator.autonomous_execution.prepare(
@@ -223,4 +242,4 @@ def _read_secret(path: Path, label: str) -> str:
     value = path.read_text(encoding="utf-8").strip()
     if not value:
         raise RuntimeError(f"Empty {label}: {path}")
-    return cast(str, value)
+    return value
