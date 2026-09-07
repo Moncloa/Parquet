@@ -50,7 +50,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 settings.execution.supervised_real_max_amount_usd
             ),
             "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
-            "broker_execution": False,
+            "broker_execution": settings.execution.supervised_real_enabled,
             "live_test_execution": settings.execution.live_test_enabled,
         }
 
@@ -104,6 +104,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "supervised_real_max_amount_usd": (
                 settings.execution.supervised_real_max_amount_usd
             ),
+            "broker_execution": settings.execution.supervised_real_enabled,
             "execution_uncertain": orchestrator.storage.get("execution_uncertain") == "1",
             "execution_attempts": [attempt.model_dump(mode="json") for attempt in attempts],
             "live_test_execution": settings.execution.live_test_enabled,
