@@ -124,12 +124,13 @@ class PositionManager:
 
         for broker_id in sorted(set(broker_positions) - set(local_positions)):
             position = broker_positions[broker_id]
+            instrument = position.symbol or str(position.instrument_id)
             issues.append(
                 ReconciliationIssue(
                     code="UNMANAGED_BROKER_POSITION",
                     broker_id=broker_id,
                     detail=(
-                        f"Broker position {broker_id} ({position.symbol or position.instrument_id}) "
+                        f"Broker position {broker_id} ({instrument}) "
                         "is not present in Parquet's managed ledger"
                     ),
                 )
