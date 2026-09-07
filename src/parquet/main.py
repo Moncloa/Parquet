@@ -10,6 +10,7 @@ import uvicorn
 from parquet.api import create_app
 from parquet.config import load_settings
 from parquet.orchestrator import Orchestrator
+from parquet.reconciliation import ReconciliationService, run_with_reconciliation
 
 
 def validate_keys(settings_path: Path | None) -> int:
@@ -28,9 +29,14 @@ def validate_keys(settings_path: Path | None) -> int:
 def serve(settings_path: Path | None) -> None:
     settings = load_settings(settings_path)
     orchestrator = Orchestrator(settings)
+    reconciliation = ReconciliationService(
+        settings,
+        orchestrator.storage,
+        orchestrator.market_client,
+    )
 
     def worker() -> None:
-        asyncio.run(orchestrator.run_forever())
+        asyncio.run(run_with_reconciliation(orchestrator, reconciliation))
 
     threading.Thread(target=worker, name="parquet-orchestrator", daemon=True).start()
     uvicorn.run(create_app(settings, orchestrator), host=settings.host, port=settings.port)
@@ -53,6 +59,20 @@ def main() -> None:
     if args.command == "once":
         settings = load_settings(args.config)
         orchestrator = Orchestrator(settings)
-        processed = asyncio.run(orchestrator.poll_github_once())
-        print(f"Processed {processed} new analysis comment(s)")
+        reconciliation = ReconciliationService(
+            settings,
+            orchestrator.storage,
+            orchestrator.market_client,
+        )
+
+        async def run_once() -> tuple[int, int]:
+            reconciled = await reconciliation.poll_once(force=True)
+            processed = await orchestrator.poll_github_once()
+            return reconciled, processed
+
+        reconciled, processed = asyncio.run(run_once())
+        print(
+            f"Reconciled broker state: {reconciled}; "
+            f"processed {processed} new analysis comment(s)"
+        )
         return
