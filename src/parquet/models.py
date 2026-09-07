@@ -7,16 +7,30 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+def _strip_output_schema_defaults(node: object) -> None:
+    """Remove JSON Schema defaults unsupported by strict structured outputs."""
+    if isinstance(node, dict):
+        node.pop("default", None)
+        for value in node.values():
+            _strip_output_schema_defaults(value)
+    elif isinstance(node, list):
+        for value in node:
+            _strip_output_schema_defaults(value)
+
+
 def _strict_output_schema_extra(schema: dict[str, Any]) -> None:
     """Make one Pydantic model object compatible with OpenAI strict outputs."""
+    # Strict structured outputs do not accept JSON Schema defaults. This is
+    # especially important for Pydantic fields such as enum defaults, which
+    # otherwise produce {"$ref": ..., "default": ...}; Codex rejects any
+    # sibling keyword next to a $ref.
+    _strip_output_schema_defaults(schema)
+
     properties = schema.get("properties")
     if not isinstance(properties, dict):
         return
     schema["additionalProperties"] = False
     schema["required"] = list(properties)
-    for property_schema in properties.values():
-        if isinstance(property_schema, dict) and property_schema.get("default", ...) is None:
-            property_schema.pop("default", None)
 
 
 class StrictOutputModel(BaseModel):
