@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
-from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
