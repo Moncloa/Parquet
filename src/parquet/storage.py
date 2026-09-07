@@ -317,6 +317,16 @@ class Storage:
             )
             self.conn.commit()
 
+    def get_execution_attempt(self, attempt_id: str) -> ExecutionAttempt | None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM execution_attempts WHERE attempt_id = ?",
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return ExecutionAttempt.model_validate_json(str(row[0]))
+
     def get_active_execution_attempt_for_proposal(
         self, proposal_id: str
     ) -> ExecutionAttempt | None:
