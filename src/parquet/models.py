@@ -104,12 +104,14 @@ class RiskSnapshot(BaseModel):
     daily_pnl_pct: float = 0.0
     weekly_pnl_pct: float = 0.0
     open_symbols: list[str] = Field(default_factory=list)
+    open_instrument_ids: list[int] = Field(default_factory=list)
 
 
 class MarketObservation(BaseModel):
     symbol: str = Field(min_length=1)
     price: float = Field(gt=0)
     observed_at: datetime
+    instrument_id: int | None = Field(default=None, gt=0)
     bid: float | None = Field(default=None, gt=0)
     ask: float | None = Field(default=None, gt=0)
     timeframe: str | None = None
