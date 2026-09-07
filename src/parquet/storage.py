@@ -6,6 +6,12 @@ from pathlib import Path
 from threading import RLock
 
 from parquet.models import RiskSnapshot, TradeProposal, WatchItem
+from parquet.portfolio import (
+    BrokerPortfolioSnapshot,
+    ManagedOrder,
+    ManagedPosition,
+    ReconciliationReport,
+)
 from parquet.scheduler import ScheduledReview
 
 SCHEMA = """
@@ -44,6 +50,18 @@ CREATE TABLE IF NOT EXISTS proposals (
     analysis_id TEXT NOT NULL,
     symbol TEXT NOT NULL,
     expires_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS managed_positions (
+    local_id TEXT PRIMARY KEY,
+    broker_position_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS managed_orders (
+    local_id TEXT PRIMARY KEY,
+    broker_order_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
     payload TEXT NOT NULL
 );
 """
@@ -189,3 +207,103 @@ class Storage:
         if payload is None:
             return None
         return RiskSnapshot.model_validate_json(payload)
+
+    def save_managed_position(self, position: ManagedPosition) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO managed_positions(local_id, broker_position_id, status, payload) "
+                "VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(local_id) DO UPDATE SET "
+                "broker_position_id=excluded.broker_position_id, "
+                "status=excluded.status, payload=excluded.payload",
+                (
+                    position.local_id,
+                    position.broker_position_id,
+                    position.status,
+                    position.model_dump_json(),
+                ),
+            )
+            self.conn.commit()
+
+    def active_managed_positions(self) -> list[ManagedPosition]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT payload FROM managed_positions WHERE status = 'OPEN' ORDER BY local_id"
+            ).fetchall()
+        return [ManagedPosition.model_validate_json(str(row[0])) for row in rows]
+
+    def set_managed_position_status(self, local_id: str, status: str) -> None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM managed_positions WHERE local_id = ?",
+                (local_id,),
+            ).fetchone()
+            if row is None:
+                return
+            position = ManagedPosition.model_validate_json(str(row[0])).model_copy(
+                update={"status": status}
+            )
+            self.conn.execute(
+                "UPDATE managed_positions SET status = ?, payload = ? WHERE local_id = ?",
+                (status, position.model_dump_json(), local_id),
+            )
+            self.conn.commit()
+
+    def save_managed_order(self, order: ManagedOrder) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO managed_orders(local_id, broker_order_id, status, payload) "
+                "VALUES(?, ?, ?, ?) "
+                "ON CONFLICT(local_id) DO UPDATE SET "
+                "broker_order_id=excluded.broker_order_id, "
+                "status=excluded.status, payload=excluded.payload",
+                (
+                    order.local_id,
+                    order.broker_order_id,
+                    order.status,
+                    order.model_dump_json(),
+                ),
+            )
+            self.conn.commit()
+
+    def active_managed_orders(self) -> list[ManagedOrder]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT payload FROM managed_orders WHERE status = 'PENDING' ORDER BY local_id"
+            ).fetchall()
+        return [ManagedOrder.model_validate_json(str(row[0])) for row in rows]
+
+    def set_managed_order_status(self, local_id: str, status: str) -> None:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT payload FROM managed_orders WHERE local_id = ?",
+                (local_id,),
+            ).fetchone()
+            if row is None:
+                return
+            order = ManagedOrder.model_validate_json(str(row[0])).model_copy(
+                update={"status": status}
+            )
+            self.conn.execute(
+                "UPDATE managed_orders SET status = ?, payload = ? WHERE local_id = ?",
+                (status, order.model_dump_json(), local_id),
+            )
+            self.conn.commit()
+
+    def set_broker_portfolio_snapshot(self, snapshot: BrokerPortfolioSnapshot) -> None:
+        self.set("broker_portfolio_snapshot", snapshot.model_dump_json())
+
+    def get_broker_portfolio_snapshot(self) -> BrokerPortfolioSnapshot | None:
+        payload = self.get("broker_portfolio_snapshot")
+        if payload is None:
+            return None
+        return BrokerPortfolioSnapshot.model_validate_json(payload)
+
+    def set_reconciliation_report(self, report: ReconciliationReport) -> None:
+        self.set("reconciliation_report", report.model_dump_json())
+
+    def get_reconciliation_report(self) -> ReconciliationReport | None:
+        payload = self.get("reconciliation_report")
+        if payload is None:
+            return None
+        return ReconciliationReport.model_validate_json(payload)
