@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from parquet.bridge.github import GitHubBridge
 from parquet.config import Settings
+from parquet.execution import ExecutionGate
 from parquet.market.etoro import EtoroMarketDataClient, InstrumentRate
 from parquet.models import (
     MarketAnalysis,
@@ -16,6 +17,7 @@ from parquet.models import (
     TriggerAction,
     WatchEvent,
     WatchEventType,
+    WatchItem,
 )
 from parquet.scheduler import ReviewQueue, ScheduledReview, ensure_structural_reviews
 from parquet.storage import Storage
@@ -31,6 +33,7 @@ class Orchestrator:
         self.settings = settings
         self.storage = Storage(settings.state_db)
         self.watch_engine = WatchEngine()
+        self.execution_gate = ExecutionGate(settings.risk, settings.etoro)
         self.reviews = ReviewQueue()
         for review in self.storage.pending_reviews():
             self.reviews.add(review)
@@ -82,6 +85,8 @@ class Orchestrator:
             analysis.generated_at.isoformat(),
             analysis.model_dump_json(),
         )
+        for proposal in analysis.trade_proposals:
+            self.storage.save_proposal(analysis.analysis_id, proposal)
         for watch in analysis.watch:
             self.storage.save_watch(analysis.analysis_id, watch)
         if analysis.next_review is not None:
@@ -112,11 +117,56 @@ class Orchestrator:
                     )
                 )
             elif event.event == WatchEventType.TRIGGERED:
-                self.storage.add_event(
-                    "watch_execute_deferred",
-                    json.dumps({"watch_id": watch.watch_id, "reason": "execution_not_implemented"}),
-                )
+                self._handle_execute_watch(watch, observation)
         return events
+
+    def _handle_execute_watch(
+        self,
+        watch: WatchItem,
+        observation: MarketObservation,
+    ) -> None:
+        payload: dict[str, object] = {
+            "watch_id": watch.watch_id,
+            "symbol": watch.symbol,
+            "observed_at": observation.observed_at.isoformat(),
+        }
+        if watch.proposal_id is None:
+            payload["reasons"] = ["proposal_id_missing"]
+            self.storage.add_event("execution_rejected", json.dumps(payload))
+            return
+
+        payload["proposal_id"] = watch.proposal_id
+        proposal = self.storage.get_proposal(watch.proposal_id)
+        if proposal is None:
+            payload["reasons"] = ["proposal_not_found"]
+            self.storage.add_event("execution_rejected", json.dumps(payload))
+            return
+        if proposal.symbol.upper() != watch.symbol.upper():
+            payload["reasons"] = ["proposal_watch_symbol_mismatch"]
+            self.storage.add_event("execution_rejected", json.dumps(payload))
+            return
+
+        snapshot = self.storage.get_risk_snapshot()
+        if snapshot is None:
+            payload["reasons"] = ["risk_snapshot_unavailable"]
+            self.storage.add_event("execution_rejected", json.dumps(payload))
+            return
+
+        decision = self.execution_gate.evaluate(
+            proposal,
+            snapshot,
+            observation,
+            now=observation.observed_at,
+        )
+        payload["gate"] = decision.as_dict()
+
+        if not decision.approved:
+            self.storage.add_event("execution_rejected", json.dumps(payload))
+        elif self.settings.mode.lower() == "shadow":
+            self.storage.add_event("execution_shadow_approved", json.dumps(payload))
+        else:
+            payload["reasons"] = ["broker_execution_not_implemented"]
+            self.storage.add_event("execution_blocked", json.dumps(payload))
 
     async def poll_github_once(self) -> int:
         if self.bridge is None:
@@ -199,7 +249,7 @@ class Orchestrator:
                 "stale": age_seconds > self.settings.etoro.max_quote_age_seconds,
             }
         unresolved = sorted(set(symbols) - set(rates))
-        return {
+        context: dict[str, object] = {
             "market_data": {
                 "provider": "etoro",
                 "captured_at": current.astimezone(UTC).isoformat(),
@@ -207,6 +257,10 @@ class Orchestrator:
                 "unresolved_symbols": unresolved,
             }
         }
+        risk_snapshot = self.storage.get_risk_snapshot()
+        if risk_snapshot is not None:
+            context["risk_snapshot"] = risk_snapshot.model_dump(mode="json")
+        return context
 
     async def poll_market_once(self, now: datetime | None = None) -> int:
         if self.market_client is None:
@@ -233,6 +287,8 @@ class Orchestrator:
                 symbol=symbol,
                 price=price,
                 observed_at=rate.timestamp,
+                bid=rate.bid,
+                ask=rate.ask,
             )
             self.process_observation(observation)
             processed += 1

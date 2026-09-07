@@ -28,6 +28,8 @@ etoro:
     - OIL
     - EURUSD
     - USDJPY
+  # Optional aliases/cache for symbols whose eToro internal name differs.
+  # Example: GOLD: 559 and OIL: 784 for the 24/7 instruments.
   instrument_ids: {}
 
 risk:
@@ -38,6 +40,11 @@ risk:
   max_daily_loss_pct: 3.0
   max_weekly_loss_pct: 6.0
   max_risk_per_trade_pct: 1.0
+  max_position_notional_pct: 100.0
+  max_spread_bps: 30.0
+  max_entry_slippage_bps: 20.0
+  max_risk_snapshot_age_seconds: 120
+  allow_duplicate_symbol_positions: false
 
 schedule:
   timezone: Europe/Madrid

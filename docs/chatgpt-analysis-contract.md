@@ -32,7 +32,21 @@ followed by one JSON object.
       "invalidation": 29440.0,
       "expires_at": "2026-09-07T12:00:00+02:00",
       "on_trigger": "REASSESS",
+      "proposal_id": null,
       "rationale": "Breakout only if confirmed by a 5-minute close"
+    },
+    {
+      "watch_id": "gold-execute-001",
+      "symbol": "GOLD",
+      "bias": "LONG",
+      "trigger": {
+        "type": "price_above",
+        "price": 4510.0
+      },
+      "expires_at": "2026-09-07T09:16:20+02:00",
+      "on_trigger": "EXECUTE",
+      "proposal_id": "gold-long-001",
+      "rationale": "Execute only after the deterministic trigger"
     }
   ],
   "trade_proposals": [
@@ -59,7 +73,7 @@ followed by one JSON object.
 
 ## Trigger vocabulary
 
-Only deterministic triggers are accepted in V0.3:
+Only deterministic triggers are accepted:
 
 - `price_above`
 - `price_below`
@@ -70,9 +84,14 @@ A `close_*` trigger should specify the timeframe when relevant.
 
 ## Semantics
 
-- `WATCH`: Parquet monitors the condition locally. `on_trigger=REASSESS` requests another ChatGPT analysis; `EXECUTE` is reserved for a later release and will still pass through the risk engine.
-- `TRADE_PROPOSAL`: this is never a broker order. Parquet validates expiry, stop-loss, risk limits, market data freshness and position sizing before any execution adapter may act.
-- `next_review`: ChatGPT may request an extraordinary future review. Structural market-opening reviews remain controlled by Parquet and cannot be cancelled by ChatGPT.
+- `WATCH`: Parquet monitors the condition locally. `on_trigger=REASSESS` requests another ChatGPT analysis.
+- `EXECUTE`: the watch must reference the exact `trade_proposals[].proposal_id`. Parquet never infers a proposal by symbol alone.
+- `TRADE_PROPOSAL`: this is never a broker order. Parquet persists the proposal and validates it again when the linked trigger fires.
+- The execution gate checks signal expiry/age, mandatory stop-loss, position/trade/loss limits, risk snapshot freshness, equity availability, duplicate-symbol exposure, quote freshness, spread, adverse entry slippage and deterministic position sizing.
+- Position sizing is controlled by Parquet from account equity, stop distance and configured risk limits. ChatGPT must not choose final account exposure.
+- `mode=shadow` never places an order. A gate-approved setup is recorded as `execution_shadow_approved` only.
+- Non-shadow broker execution remains blocked until a dedicated execution adapter and reconciliation loop are implemented.
+- `next_review`: ChatGPT may request an extraordinary future review. Structural reviews remain controlled by Parquet.
 - `NO TRADE`: use empty `watch` and `trade_proposals` arrays. This is a valid and expected result.
 
 ## Prompt guidance for the ChatGPT task
@@ -85,5 +104,6 @@ The task should explicitly:
 4. Never invent prices or indicators that were not obtained from current data or supplied by Parquet.
 5. Always attach an expiry to watches and proposals.
 6. Always include a stop-loss on trade proposals.
-7. Request `next_review` only for a concrete catalyst or unresolved market condition.
-8. Never choose final account exposure or override Parquet risk limits.
+7. For `on_trigger=EXECUTE`, always link the watch with `proposal_id` to one exact proposal in the same analysis.
+8. Request `next_review` only for a concrete catalyst or unresolved market condition.
+9. Never choose final account exposure or override Parquet risk limits.
