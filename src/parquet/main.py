@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
@@ -13,6 +14,8 @@ from parquet.config import Settings, load_settings
 from parquet.execution.etoro import EtoroExecutionClient
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.reconciliation import ReconciliationService, run_with_reconciliation
+from parquet.storage import Storage
+from parquet.tickets import prepare_real_small_ticket, recent_proposals
 
 
 def validate_keys(settings_path: Path | None) -> int:
@@ -94,6 +97,66 @@ def run_etoro_check(settings_path: Path | None) -> int:
     return 0
 
 
+def run_proposals(settings_path: Path | None, limit: int) -> int:
+    settings = load_settings(settings_path)
+    storage = Storage(settings.state_db)
+    records = recent_proposals(storage, limit=limit)
+    if not records:
+        print("No trade proposals stored")
+        return 0
+
+    now = datetime.now(UTC)
+    print("Recent trade proposals")
+    for record in records:
+        proposal = record.proposal
+        state = "ACTIVE" if proposal.expires_at.astimezone(UTC) > now else "EXPIRED"
+        print(
+            f"{proposal.proposal_id}  {state}  {proposal.symbol} {proposal.side.value}  "
+            f"entry={proposal.entry}  SL={proposal.stop_loss}  TP={proposal.take_profit}  "
+            f"expires={proposal.expires_at.astimezone(UTC).isoformat()}  "
+            f"analysis={record.analysis_id}"
+        )
+    return 0
+
+
+def run_prepare_real_small(
+    settings_path: Path | None,
+    proposal_id: str,
+    amount_usd: float | None,
+) -> int:
+    settings = load_settings(settings_path)
+    ticket = asyncio.run(
+        prepare_real_small_ticket(
+            settings,
+            proposal_id=proposal_id,
+            requested_amount_usd=amount_usd,
+        )
+    )
+    attempt = ticket.attempt
+    decision = ticket.gate_decision
+    observation = ticket.observation
+
+    print("Prepared supervised real-small ticket -- NO BROKER ORDER SENT")
+    print(f"  attempt: {attempt.attempt_id}")
+    print(f"  proposal: {attempt.proposal_id}")
+    print(f"  symbol: {attempt.symbol}")
+    print(f"  instrument_id: {attempt.instrument_id}")
+    print(f"  side: {attempt.side}")
+    print(f"  quote_bid: {observation.bid}")
+    print(f"  quote_ask: {observation.ask}")
+    print(f"  quote_at: {observation.observed_at.astimezone(UTC).isoformat()}")
+    print(f"  broker_minimum_usd: {ticket.broker_minimum_usd}")
+    print(f"  gate_maximum_usd: {decision.amount_usd}")
+    print(f"  supervised_safe_maximum_usd: {ticket.maximum_safe_amount_usd:.2f}")
+    print(f"  prepared_amount_usd: {attempt.amount_usd:.2f}")
+    print(f"  stop_loss: {attempt.stop_loss}")
+    print(f"  take_profit: {attempt.take_profit}")
+    print(f"  spread_bps: {decision.spread_bps}")
+    print(f"  adverse_slippage_bps: {decision.adverse_slippage_bps}")
+    print("No execution POST has been sent.")
+    return 0
+
+
 def run_real_small(settings_path: Path | None, attempt_id: str) -> int:
     settings = load_settings(settings_path)
     orchestrator = AutonomousOrchestrator(settings)
@@ -142,6 +205,14 @@ def main() -> None:
     sub.add_parser("validate")
     sub.add_parser("once")
     sub.add_parser("etoro-check")
+
+    proposals = sub.add_parser("proposals")
+    proposals.add_argument("--limit", type=int, default=20)
+
+    prepare_real_small = sub.add_parser("prepare-real-small")
+    prepare_real_small.add_argument("proposal_id")
+    prepare_real_small.add_argument("--amount", type=float, default=None)
+
     real_small = sub.add_parser("real-small")
     real_small.add_argument("attempt_id")
     args = parser.parse_args()
@@ -153,6 +224,13 @@ def main() -> None:
         return
     if args.command == "etoro-check":
         raise SystemExit(run_etoro_check(args.config))
+    if args.command == "proposals":
+        raise SystemExit(run_proposals(args.config, int(args.limit)))
+    if args.command == "prepare-real-small":
+        amount = None if args.amount is None else float(args.amount)
+        raise SystemExit(
+            run_prepare_real_small(args.config, str(args.proposal_id), amount)
+        )
     if args.command == "real-small":
         raise SystemExit(run_real_small(args.config, str(args.attempt_id)))
     if args.command == "once":
