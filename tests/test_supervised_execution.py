@@ -61,10 +61,11 @@ class BaseClient:
 
 class SuccessClient(BaseClient):
     async def open_market_order(self, **kwargs):
+        request_id = str(kwargs["request_id"])
         return EtoroOrderResult(
-            request_id="req-1",
+            request_id=request_id,
             payload=dict(kwargs),
-            response={"orderId": "order-1", "referenceId": "req-1"},
+            response={"orderId": "order-1", "referenceId": request_id},
         )
 
     async def lookup_order(self, **kwargs):
@@ -80,23 +81,32 @@ class SuccessClient(BaseClient):
 
 class RejectClient(BaseClient):
     async def open_market_order(self, **kwargs):
-        raise EtoroExecutionError(400, "rejected", "req-reject")
+        request_id = str(kwargs["request_id"])
+        raise EtoroExecutionError(400, "rejected", request_id)
 
 
 class TimeoutClient(BaseClient):
     async def open_market_order(self, **kwargs):
-        raise EtoroExecutionTransportError("timeout", "req-timeout")
+        request_id = str(kwargs["request_id"])
+        raise EtoroExecutionTransportError("timeout", request_id)
 
     async def lookup_order(self, **kwargs):
         raise EtoroExecutionError(404, "not found", "lookup-timeout")
 
 
+class ServerErrorRecoveredClient(SuccessClient):
+    async def open_market_order(self, **kwargs):
+        request_id = str(kwargs["request_id"])
+        raise EtoroExecutionError(503, "upstream response lost", request_id)
+
+
 class InFlightClient(BaseClient):
     async def open_market_order(self, **kwargs):
+        request_id = str(kwargs["request_id"])
         return EtoroOrderResult(
-            request_id="req-order",
+            request_id=request_id,
             payload=dict(kwargs),
-            response={"orderId": "order-1", "referenceId": "req-order"},
+            response={"orderId": "order-1", "referenceId": request_id},
         )
 
     async def lookup_order(self, **kwargs):
@@ -174,9 +184,8 @@ def _adapter(tmp_path, client, snapshots):
     return adapter, storage, reconciliation
 
 
-@pytest.mark.asyncio
-async def test_supervised_real_success_reconciles_position(tmp_path) -> None:
-    second = _snapshot(
+def _filled_snapshot() -> BrokerPortfolioSnapshot:
+    return _snapshot(
         positions=[
             BrokerPosition(
                 position_id="pos-1",
@@ -187,10 +196,14 @@ async def test_supervised_real_success_reconciles_position(tmp_path) -> None:
             )
         ]
     )
+
+
+@pytest.mark.asyncio
+async def test_supervised_real_success_reconciles_position(tmp_path) -> None:
     adapter, storage, reconciliation = _adapter(
         tmp_path,
         SuccessClient(),
-        [_snapshot(), second],
+        [_snapshot(), _filled_snapshot()],
     )
 
     result = await adapter.execute(
@@ -199,6 +212,7 @@ async def test_supervised_real_success_reconciles_position(tmp_path) -> None:
     )
 
     assert result.state == ExecutionAttemptState.RECONCILED
+    assert result.broker_request_id
     assert result.broker_order_id == "order-1"
     assert result.broker_position_id == "pos-1"
     assert reconciliation.calls == 2
@@ -219,7 +233,7 @@ async def test_supervised_real_rejection_is_terminal_not_uncertain(tmp_path) -> 
     )
 
     assert result.state == ExecutionAttemptState.REJECTED
-    assert result.broker_request_id == "req-reject"
+    assert result.broker_request_id
     assert storage.get("execution_uncertain") != "1"
 
 
@@ -233,8 +247,29 @@ async def test_supervised_real_transport_timeout_uses_lookup_then_blocks_if_unre
     )
 
     assert result.state == ExecutionAttemptState.OUTCOME_UNKNOWN
-    assert result.broker_request_id == "req-timeout"
+    assert result.broker_request_id
     assert storage.get("execution_uncertain") == "1"
+
+
+@pytest.mark.asyncio
+async def test_server_error_recovers_by_reference_id_without_second_post(tmp_path) -> None:
+    adapter, storage, reconciliation = _adapter(
+        tmp_path,
+        ServerErrorRecoveredClient(),
+        [_snapshot(), _filled_snapshot()],
+    )
+
+    result = await adapter.execute(
+        _attempt(),
+        confirmation="REAL attempt-1",
+    )
+
+    assert result.state == ExecutionAttemptState.RECONCILED
+    assert result.broker_request_id
+    assert result.broker_order_id == "order-1"
+    assert result.broker_position_id == "pos-1"
+    assert reconciliation.calls == 2
+    assert storage.get("execution_uncertain") == "0"
 
 
 @pytest.mark.asyncio
@@ -276,6 +311,7 @@ async def test_filled_position_missing_after_reconciliation_becomes_unknown(tmp_
     assert reconciliation.calls == 2
     assert result.state == ExecutionAttemptState.OUTCOME_UNKNOWN
     assert result.reason == "filled_position_not_visible_after_reconciliation"
+    assert result.broker_order_id == "order-1"
     assert storage.get("execution_uncertain") == "1"
 
 
@@ -295,6 +331,7 @@ async def test_in_flight_order_exhausting_lookup_window_becomes_unknown(tmp_path
     assert reconciliation.calls == 1
     assert result.state == ExecutionAttemptState.OUTCOME_UNKNOWN
     assert result.reason == "broker_order_still_in_flight:Placed"
+    assert result.broker_order_id == "order-1"
     assert storage.get("execution_uncertain") == "1"
 
 
