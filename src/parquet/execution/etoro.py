@@ -21,6 +21,29 @@ class EtoroOrderResult:
     response: dict[str, Any]
 
 
+def market_buy_payload(
+    *,
+    instrument_id: int,
+    amount_usd: float,
+    stop_loss_rate: float,
+    take_profit_rate: float | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "action": "open",
+        "transaction": "buy",
+        "instrumentId": instrument_id,
+        "orderType": "mkt",
+        "amount": amount_usd,
+        "orderCurrency": "usd",
+        "leverage": 1,
+        "stopLossRate": stop_loss_rate,
+        "stopLossType": "fixed",
+    }
+    if take_profit_rate is not None:
+        payload["takeProfitRate"] = take_profit_rate
+    return payload
+
+
 class EtoroExecutionClient:
     """Minimal eToro live execution client. No retries are performed."""
 
@@ -46,20 +69,12 @@ class EtoroExecutionClient:
         take_profit_rate: float | None = None,
     ) -> EtoroOrderResult:
         request_id = str(uuid4())
-        payload: dict[str, Any] = {
-            "action": "open",
-            "transaction": "buy",
-            "instrumentId": instrument_id,
-            "orderType": "mkt",
-            "amount": amount_usd,
-            "orderCurrency": "usd",
-            "leverage": 1,
-            "stopLossRate": stop_loss_rate,
-            "stopLossType": "fixed",
-        }
-        if take_profit_rate is not None:
-            payload["takeProfitRate"] = take_profit_rate
-
+        payload = market_buy_payload(
+            instrument_id=instrument_id,
+            amount_usd=amount_usd,
+            stop_loss_rate=stop_loss_rate,
+            take_profit_rate=take_profit_rate,
+        )
         headers = {
             "x-api-key": self.api_key,
             "x-user-key": self.user_key,
