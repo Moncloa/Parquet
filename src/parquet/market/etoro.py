@@ -101,10 +101,7 @@ class EtoroMarketDataClient:
     async def search(self, query: str) -> list[InstrumentSearchHit]:
         body = await self._get(
             "/market-data/search",
-            params={
-                "internalSymbolFull": query,
-                "fields": "instrumentId,internalSymbolFull,displayname",
-            },
+            params={"internalSymbolFull": query},
         )
         items = _search_items(body)
         results: list[InstrumentSearchHit] = []

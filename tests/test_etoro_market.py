@@ -44,10 +44,10 @@ async def test_rates_parse_official_shape_and_send_auth_headers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_uses_exact_symbol_and_parses_items_shape() -> None:
+async def test_search_uses_exact_symbol_without_fields_projection() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params["internalSymbolFull"] == "TSLA"
-        assert request.url.params["fields"] == "instrumentId,internalSymbolFull,displayname"
+        assert "fields" not in request.url.params
         return httpx.Response(
             200,
             json={
