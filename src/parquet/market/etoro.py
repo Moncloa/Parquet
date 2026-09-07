@@ -106,22 +106,23 @@ class EtoroMarketDataClient:
         items = _search_items(body)
         results: list[InstrumentSearchHit] = []
         for item in items:
-            raw_id = item.get("instrumentId", item.get("InstrumentID"))
+            raw_id = _first(item, "instrumentId", "instrumentID", "InstrumentID")
             if raw_id is None:
                 continue
             results.append(
                 InstrumentSearchHit(
                     instrument_id=int(raw_id),
                     symbol=_optional_str(
-                        item.get("internalSymbolFull")
-                        or item.get("symbol")
-                        or item.get("Symbol")
+                        _first(item, "internalSymbolFull", "symbol", "Symbol")
                     ),
                     name=_optional_str(
-                        item.get("displayname")
-                        or item.get("displayName")
-                        or item.get("name")
-                        or item.get("instrumentName")
+                        _first(
+                            item,
+                            "displayname",
+                            "displayName",
+                            "name",
+                            "instrumentName",
+                        )
                     ),
                 )
             )
@@ -137,20 +138,20 @@ class EtoroMarketDataClient:
         items = _rate_items(body)
         result: list[InstrumentRate] = []
         for item in items:
-            raw_id = item.get("instrumentId", item.get("InstrumentID"))
+            raw_id = _first(item, "instrumentId", "instrumentID", "InstrumentID")
             if raw_id is None:
                 continue
-            timestamp = _parse_timestamp(item.get("timestamp"))
+            timestamp = _parse_timestamp(_first(item, "timestamp", "date"))
             result.append(
                 InstrumentRate(
                     instrument_id=int(raw_id),
                     symbol=_optional_str(
-                        item.get("symbol") or item.get("internalSymbolFull")
+                        _first(item, "symbol", "internalSymbolFull", "Symbol")
                     ),
                     bid=_optional_float(item.get("bid")),
                     ask=_optional_float(item.get("ask")),
                     last_price=_optional_float(
-                        item.get("lastPrice", item.get("lastExecution"))
+                        _first(item, "lastPrice", "lastExecution")
                     ),
                     change=_optional_float(item.get("change")),
                     timestamp=timestamp,
@@ -192,6 +193,14 @@ def _parse_timestamp(value: Any) -> datetime:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed.astimezone(UTC)
     return datetime.now(UTC)
+
+
+def _first(item: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = item.get(key)
+        if value is not None:
+            return value
+    return None
 
 
 def _optional_str(value: Any) -> str | None:
