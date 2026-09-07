@@ -14,6 +14,8 @@ from parquet.portfolio import PositionManager
 
 class ExecutionAttemptState(StrEnum):
     PREPARED = "PREPARED"
+    SUBMITTING = "SUBMITTING"
+    ACKNOWLEDGED = "ACKNOWLEDGED"
     SHADOW_EXECUTED = "SHADOW_EXECUTED"
     DEMO_PENDING = "DEMO_PENDING"
     REJECTED = "REJECTED"
@@ -38,11 +40,12 @@ class ExecutionAttempt(BaseModel):
     state: ExecutionAttemptState
     broker_request_id: str | None = None
     broker_order_id: str | None = None
+    broker_position_id: str | None = None
     reason: str | None = None
 
 
 class AutonomousExecutionCoordinator:
-    """Transactional autonomous-execution coordinator for shadow/demo validation."""
+    """Transactional execution coordinator shared by shadow and supervised flows."""
 
     def __init__(self, storage: Any, position_manager: PositionManager) -> None:
         self.storage = storage
