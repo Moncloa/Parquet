@@ -277,7 +277,7 @@ class StrategyDispatcher:
 
 @dataclass(frozen=True)
 class CodexWorkerSettings:
-    queue_dir: Path = Path("/var/lib/parquet/strategy")
+    queue_dir: Path = Path("/var/lib/parquet-exchange")
     codex_binary: str = "codex"
     codex_home: Path = Path("/var/lib/parquet-strategy/codex")
     work_dir: Path = Path("/var/lib/parquet-strategy/work")
@@ -294,7 +294,7 @@ class CodexWorkerSettings:
         if effort not in {"none", "low", "medium", "high", "xhigh"}:
             raise ValueError(f"Invalid PARQUET_CODEX_REASONING_EFFORT: {effort}")
         return cls(
-            queue_dir=Path(os.getenv("PARQUET_STRATEGY_QUEUE", "/var/lib/parquet/strategy")),
+            queue_dir=Path(os.getenv("PARQUET_STRATEGY_QUEUE", "/var/lib/parquet-exchange")),
             codex_binary=os.getenv("PARQUET_CODEX_BINARY", "codex"),
             codex_home=Path(os.getenv("CODEX_HOME", "/var/lib/parquet-strategy/codex")),
             work_dir=Path(os.getenv("PARQUET_STRATEGY_WORK", "/var/lib/parquet-strategy/work")),
@@ -520,8 +520,11 @@ def _validate_analysis_for_request(analysis: MarketAnalysis, request: ReviewRequ
         if watch.on_trigger == TriggerAction.EXECUTE:
             if watch.proposal_id is None:
                 raise RuntimeError(f"EXECUTE watch {watch.watch_id} is missing proposal_id")
-            proposal = proposals.get(watch.proposal_id)
-            if proposal is None or proposal.symbol.upper() != watch.symbol.upper():
+            linked_proposal = proposals.get(watch.proposal_id)
+            if (
+                linked_proposal is None
+                or linked_proposal.symbol.upper() != watch.symbol.upper()
+            ):
                 raise RuntimeError(
                     f"EXECUTE watch {watch.watch_id} does not reference a matching proposal"
                 )
