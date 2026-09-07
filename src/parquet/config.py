@@ -20,6 +20,26 @@ class GitHubConfig(BaseModel):
     token_file: Path = Path("/etc/parquet/github_token")
 
 
+class EtoroConfig(BaseModel):
+    enabled: bool = False
+    api_key_file: Path = Path("/etc/parquet/etoro_api_key")
+    user_key_file: Path = Path("/etc/parquet/etoro_user_key")
+    base_url: str = "https://public-api.etoro.com/api/v1"
+    review_symbols: list[str] = Field(
+        default_factory=lambda: [
+            "GER40",
+            "NSDQ100",
+            "SPX500",
+            "GOLD",
+            "OIL",
+            "EURUSD",
+            "USDJPY",
+        ]
+    )
+    instrument_ids: dict[str, int] = Field(default_factory=dict)
+    max_quote_age_seconds: int = Field(default=120, ge=1, le=3600)
+
+
 class RiskConfig(BaseModel):
     stop_loss_required: bool = True
     max_signal_age_minutes: int = 15
@@ -52,6 +72,7 @@ class Settings(BaseModel):
     poll_seconds: int = 20
     keys: KeyConfig = Field(default_factory=KeyConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
+    etoro: EtoroConfig = Field(default_factory=EtoroConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
 
@@ -76,6 +97,8 @@ def load_settings(path: Path | None = None) -> Settings:
         "PARQUET_PRIVATE_KEY": (["keys", "private_key"], str),
         "PARQUET_PUBLIC_KEY": (["keys", "public_key"], str),
         "PARQUET_GITHUB_TOKEN_FILE": (["github", "token_file"], str),
+        "PARQUET_ETORO_API_KEY_FILE": (["etoro", "api_key_file"], str),
+        "PARQUET_ETORO_USER_KEY_FILE": (["etoro", "user_key_file"], str),
     }
     for env_name, (keys, cast) in env_overrides.items():
         if env_name in os.environ:
