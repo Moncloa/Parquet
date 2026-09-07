@@ -71,6 +71,7 @@ def run_real_small(settings_path: Path | None, attempt_id: str) -> int:
         api_key=_read_secret(settings.etoro.api_key_file, "eToro API key"),
         user_key=_read_secret(settings.etoro.user_key_file, "eToro User key"),
         base_url=settings.etoro.execution_base_url,
+        identity_base_url=settings.etoro.base_url,
     )
     adapter = RealSmallExecutionAdapter(
         settings=settings,
