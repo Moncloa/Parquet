@@ -63,6 +63,7 @@ class StructuralReview(BaseModel):
     minute: int = Field(ge=0, le=59)
     offset_minutes: int = Field(default=1, ge=0, le=60)
     weekdays: list[int] = Field(default_factory=lambda: [0, 1, 2, 3, 4])
+    calendar: str | None = None
 
 
 class ScheduleConfig(BaseModel):

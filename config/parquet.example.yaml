@@ -52,16 +52,19 @@ schedule:
   structural_reviews:
     - name: asia_open
       timezone: Asia/Tokyo
+      calendar: XTKS
       hour: 9
       minute: 0
       offset_minutes: 1
     - name: europe_open
       timezone: Europe/Berlin
+      calendar: XETR
       hour: 9
       minute: 0
       offset_minutes: 1
     - name: wall_street_open
       timezone: America/New_York
+      calendar: XNYS
       hour: 9
       minute: 30
       offset_minutes: 1

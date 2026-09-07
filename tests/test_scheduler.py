@@ -33,6 +33,47 @@ def test_wall_street_schedule_uses_new_york_timezone() -> None:
     assert next_structural_review(rule, after_us_dst).at.hour == 13
 
 
+def test_wall_street_skips_labor_day() -> None:
+    rule = StructuralReview(
+        name="wall_street_open",
+        timezone="America/New_York",
+        calendar="XNYS",
+        hour=9,
+        minute=30,
+        offset_minutes=1,
+    )
+    labor_day = datetime(2026, 9, 7, 11, 0, tzinfo=UTC)
+
+    review = next_structural_review(rule, labor_day)
+
+    assert review.at == datetime(2026, 9, 8, 13, 31, tzinfo=UTC)
+
+
+def test_invalid_persisted_holiday_review_is_replaced() -> None:
+    rule = StructuralReview(
+        name="wall_street_open",
+        timezone="America/New_York",
+        calendar="XNYS",
+        hour=9,
+        minute=30,
+        offset_minutes=1,
+    )
+    queue = ReviewQueue()
+    queue.add(
+        ScheduledReview(
+            at=datetime(2026, 9, 7, 13, 31, tzinfo=UTC),
+            reason="market_open:wall_street_open",
+            source="structural",
+        )
+    )
+
+    ensure_structural_reviews(queue, [rule], datetime(2026, 9, 7, 11, 0, tzinfo=UTC))
+
+    assert [item.at for item in queue.pending()] == [
+        datetime(2026, 9, 8, 13, 31, tzinfo=UTC)
+    ]
+
+
 def test_structural_review_is_not_duplicated() -> None:
     rule = StructuralReview(
         name="europe_open",

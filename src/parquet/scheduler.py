@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from functools import lru_cache
+from typing import Any
 from zoneinfo import ZoneInfo
+
+import exchange_calendars as xcals  # type: ignore[import-untyped]
 
 from parquet.config import StructuralReview
 
@@ -39,6 +43,29 @@ class ReviewQueue:
         return sorted(self._items.values(), key=lambda item: item.at)
 
 
+@lru_cache(maxsize=16)
+def _exchange_calendar(name: str) -> Any:
+    try:
+        return xcals.get_calendar(name)
+    except Exception as exc:
+        raise ValueError(f"Unknown exchange calendar: {name}") from exc
+
+
+def _is_trading_date(rule: StructuralReview, candidate_date: date) -> bool:
+    if candidate_date.weekday() not in rule.weekdays:
+        return False
+    if rule.calendar is None:
+        return True
+    return bool(_exchange_calendar(rule.calendar).is_session(candidate_date.isoformat()))
+
+
+def structural_review_is_valid(review: ScheduledReview, rule: StructuralReview) -> bool:
+    if review.source != "structural" or review.reason != f"market_open:{rule.name}":
+        return False
+    local_date = review.at.astimezone(ZoneInfo(rule.timezone)).date()
+    return _is_trading_date(rule, local_date)
+
+
 def next_structural_review(
     rule: StructuralReview,
     now: datetime | None = None,
@@ -47,9 +74,9 @@ def next_structural_review(
     market_tz = ZoneInfo(rule.timezone)
     local_now = current.astimezone(market_tz)
 
-    for day_offset in range(8):
+    for day_offset in range(14):
         candidate_date = local_now.date() + timedelta(days=day_offset)
-        if candidate_date.weekday() not in rule.weekdays:
+        if not _is_trading_date(rule, candidate_date):
             continue
         local_open = datetime.combine(
             candidate_date,
@@ -72,6 +99,14 @@ def ensure_structural_reviews(
     rules: list[StructuralReview],
     now: datetime | None = None,
 ) -> None:
+    rules_by_reason = {f"market_open:{rule.name}": rule for rule in rules}
+    for item in queue.pending():
+        if item.source != "structural":
+            continue
+        rule = rules_by_reason.get(item.reason)
+        if rule is None or not structural_review_is_valid(item, rule):
+            queue.remove(item)
+
     existing_reasons = {
         item.reason for item in queue.pending() if item.source == "structural"
     }

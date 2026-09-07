@@ -71,14 +71,18 @@ class Orchestrator:
         self.storage.schedule_review(review)
 
     def ensure_structural_reviews(self, now: datetime | None = None) -> None:
-        before = {review.key for review in self.reviews.pending()}
+        before = {review.key: review for review in self.reviews.pending()}
         ensure_structural_reviews(
             self.reviews,
             self.settings.schedule.structural_reviews,
             now,
         )
-        for review in self.reviews.pending():
-            if review.key not in before:
+        after = {review.key: review for review in self.reviews.pending()}
+        for key, review in before.items():
+            if key not in after:
+                self.storage.delete_review(review)
+        for key, review in after.items():
+            if key not in before:
                 self.storage.schedule_review(review)
 
     def process_analysis(self, analysis: MarketAnalysis) -> None:

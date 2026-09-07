@@ -7,7 +7,7 @@ from parquet.orchestrator import Orchestrator
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
-    app = FastAPI(title="Parquet", version="0.5.1")
+    app = FastAPI(title="Parquet", version="0.5.2")
 
     @app.get("/health")
     def health() -> dict[str, object]:
