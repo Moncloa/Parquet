@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from math import ceil
 from statistics import pstdev
 from typing import Any
+from uuid import uuid4
 
 import websockets
 
@@ -20,6 +21,16 @@ class StreamTick:
     price: float
     bid: float | None = None
     ask: float | None = None
+
+
+def build_websocket_request(operation: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Build one eToro WebSocket command with the correlation GUID used by official examples."""
+
+    return {
+        "id": str(uuid4()),
+        "operation": operation,
+        "data": data,
+    }
 
 
 class EtoroWebSocketScanner:
@@ -75,23 +86,23 @@ class EtoroWebSocketScanner:
         async with websockets.connect(self.url, ping_interval=20, ping_timeout=20) as socket:
             await socket.send(
                 json.dumps(
-                    {
-                        "operation": "Authenticate",
-                        "data": {"userKey": self.user_key, "apiKey": self.api_key},
-                    }
+                    build_websocket_request(
+                        "Authenticate",
+                        {"userKey": self.user_key, "apiKey": self.api_key},
+                    )
                 )
             )
             for start in range(0, len(self.instrument_ids), 100):
                 batch = self.instrument_ids[start : start + 100]
                 await socket.send(
                     json.dumps(
-                        {
-                            "operation": "Subscribe",
-                            "data": {
+                        build_websocket_request(
+                            "Subscribe",
+                            {
                                 "topics": [f"instrument:{value}" for value in batch],
                                 "snapshot": False,
                             },
-                        }
+                        )
                     )
                 )
             self.connected = True
@@ -171,11 +182,18 @@ def parse_stream_error(raw: str | bytes) -> str | None:
         return None
     if not isinstance(payload, dict):
         return None
+
     normalized = {str(key): value for key, value in payload.items()}
-    operation = normalized.get("operation") or normalized.get("type") or normalized.get("event")
-    success = normalized.get("success")
-    status = normalized.get("status")
-    error = normalized.get("error") or normalized.get("message")
+    raw_data = normalized.get("data")
+    data = (
+        {str(key): value for key, value in raw_data.items()}
+        if isinstance(raw_data, dict)
+        else {}
+    )
+
+    operation = _first_scalar(normalized, data, "operation", "type", "event")
+    success = _first_value(normalized, data, "success", "isSucceeded", "isSuccess")
+    status = _first_scalar(normalized, data, "status")
     explicitly_failed = success is False or (
         isinstance(status, str) and status.lower() in {"error", "failed", "failure", "rejected"}
     ) or (
@@ -183,13 +201,20 @@ def parse_stream_error(raw: str | bytes) -> str | None:
     )
     if not explicitly_failed:
         return None
+
     operation_text = "websocket" if operation is None else str(operation)
-    # Never serialize the whole server frame here: an auth acknowledgement could echo
-    # credential-shaped fields. Only retain a short scalar error/message string.
-    if isinstance(error, (str, int, float, bool)):
-        detail = str(error)[:240]
-        return f"eToro WebSocket {operation_text} failed: {detail}"
-    return f"eToro WebSocket {operation_text} failed"
+    safe_parts: list[str] = []
+    if status is not None:
+        safe_parts.append(f"status={str(status)[:80]}")
+    code = _first_scalar(normalized, data, "code", "errorCode", "error_code")
+    if code is not None:
+        safe_parts.append(f"code={str(code)[:80]}")
+    detail = _first_scalar(normalized, data, "error", "message", "reason", "description")
+    if detail is not None:
+        safe_parts.append(f"message={str(detail)[:240]}")
+
+    suffix = "" if not safe_parts else ": " + ", ".join(safe_parts)
+    return f"eToro WebSocket {operation_text} failed{suffix}"
 
 
 def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
@@ -235,6 +260,29 @@ def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
         bid=bid,
         ask=ask,
     )
+
+
+def _first_value(
+    primary: dict[str, Any],
+    secondary: dict[str, Any],
+    *keys: str,
+) -> Any:
+    for source in (primary, secondary):
+        for key in keys:
+            if key in source:
+                return source[key]
+    return None
+
+
+def _first_scalar(
+    primary: dict[str, Any],
+    secondary: dict[str, Any],
+    *keys: str,
+) -> str | int | float | bool | None:
+    value = _first_value(primary, secondary, *keys)
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return None
 
 
 def _downsample(points: list[StreamTick], max_points: int) -> list[StreamTick]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import httpx
 import pytest
@@ -8,10 +9,22 @@ import pytest
 from parquet.market.stream import (
     EtoroWebSocketScanner,
     StreamTick,
+    build_websocket_request,
     parse_stream_error,
     parse_stream_tick,
 )
 from parquet.market.universe import EtoroUniverseClient, rotate_universe
+
+
+def test_build_websocket_request_adds_unique_uuid() -> None:
+    first = build_websocket_request("Authenticate", {"userKey": "user", "apiKey": "api"})
+    second = build_websocket_request("Subscribe", {"topics": ["instrument:32"]})
+
+    UUID(first["id"])
+    UUID(second["id"])
+    assert first["id"] != second["id"]
+    assert first["operation"] == "Authenticate"
+    assert second["operation"] == "Subscribe"
 
 
 def test_parse_stream_tick_accepts_nested_payload() -> None:
@@ -31,8 +44,22 @@ def test_parse_stream_error_reports_failure_without_echoing_payload() -> None:
         '"message":"not allowed","apiKey":"secret-value"}'
     )
 
-    assert error == "eToro WebSocket Authenticate failed: not allowed"
+    assert error == "eToro WebSocket Authenticate failed: message=not allowed"
     assert "secret-value" not in error
+
+
+def test_parse_stream_error_reports_nested_safe_fields() -> None:
+    error = parse_stream_error(
+        '{"status":"failed","data":{"operation":"Subscribe",'
+        '"errorCode":"BAD_REQUEST","reason":"missing id",'
+        '"userKey":"secret-user-key"}}'
+    )
+
+    assert error == (
+        "eToro WebSocket Subscribe failed: status=failed, "
+        "code=BAD_REQUEST, message=missing id"
+    )
+    assert "secret-user-key" not in error
 
 
 def test_parse_stream_error_ignores_successful_control_message() -> None:
