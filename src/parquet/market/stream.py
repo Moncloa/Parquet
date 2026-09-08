@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
 from statistics import pstdev
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import websockets
 
