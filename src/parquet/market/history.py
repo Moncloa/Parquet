@@ -50,7 +50,10 @@ class MarketHistoryStore:
         points = [item for item in points if item.observed_at >= cutoff]
         if len(points) > max_samples:
             points = points[-max_samples:]
-        self.storage.set(self._key(symbol), json.dumps([item.model_dump(mode="json") for item in points]))
+        self.storage.set(
+            self._key(symbol),
+            json.dumps([item.model_dump(mode="json") for item in points]),
+        )
 
     def context(
         self,
@@ -62,7 +65,11 @@ class MarketHistoryStore:
     ) -> dict[str, Any]:
         current = now.astimezone(UTC)
         cutoff = current - timedelta(minutes=retention_minutes)
-        points = [item for item in self._load(symbol.upper()) if cutoff <= item.observed_at <= current]
+        points = [
+            item
+            for item in self._load(symbol.upper())
+            if cutoff <= item.observed_at <= current
+        ]
         if not points:
             return {
                 "sample_count": 0,
@@ -73,7 +80,11 @@ class MarketHistoryStore:
         compact = _downsample(points, max_points)
         return {
             "sample_count": len(points),
-            "span_minutes": round((points[-1].observed_at - points[0].observed_at).total_seconds() / 60.0, 2),
+            "span_minutes": round(
+                (points[-1].observed_at - points[0].observed_at).total_seconds()
+                / 60.0,
+                2,
+            ),
             "first_at": points[0].observed_at.isoformat(),
             "last_at": points[-1].observed_at.isoformat(),
             "points": [
@@ -101,7 +112,9 @@ class MarketHistoryStore:
         return f"market_history:{symbol.upper()}"
 
 
-def _downsample(points: list[MarketHistoryPoint], max_points: int) -> list[MarketHistoryPoint]:
+def _downsample(
+    points: list[MarketHistoryPoint], max_points: int
+) -> list[MarketHistoryPoint]:
     if len(points) <= max_points:
         return points
     stride = ceil((len(points) - 1) / (max_points - 1))
@@ -111,14 +124,22 @@ def _downsample(points: list[MarketHistoryPoint], max_points: int) -> list[Marke
     return sampled[-max_points:]
 
 
-def _metrics(points: list[MarketHistoryPoint], current: datetime) -> dict[str, float | None]:
+def _metrics(
+    points: list[MarketHistoryPoint], current: datetime
+) -> dict[str, float | None]:
     latest = points[-1]
     metrics: dict[str, float | None] = {}
     for minutes in (5, 15, 60):
         baseline = _baseline(points, current - timedelta(minutes=minutes))
-        metrics[f"change_pct_{minutes}m"] = None if baseline is None else _pct_change(baseline.price, latest.price)
+        metrics[f"change_pct_{minutes}m"] = (
+            None if baseline is None else _pct_change(baseline.price, latest.price)
+        )
 
-    recent_60 = [item for item in points if item.observed_at >= current - timedelta(minutes=60)]
+    recent_60 = [
+        item
+        for item in points
+        if item.observed_at >= current - timedelta(minutes=60)
+    ]
     prices = [item.price for item in recent_60]
     if prices:
         high = max(prices)
@@ -133,14 +154,18 @@ def _metrics(points: list[MarketHistoryPoint], current: datetime) -> dict[str, f
 
     returns_bps = [
         ((right.price / left.price) - 1.0) * 10_000.0
-        for left, right in zip(recent_60, recent_60[1:])
+        for left, right in zip(recent_60, recent_60[1:], strict=False)
         if left.price != 0
     ]
-    metrics["step_volatility_bps_60m"] = round(pstdev(returns_bps), 4) if len(returns_bps) >= 2 else None
+    metrics["step_volatility_bps_60m"] = (
+        round(pstdev(returns_bps), 4) if len(returns_bps) >= 2 else None
+    )
     return metrics
 
 
-def _baseline(points: list[MarketHistoryPoint], target: datetime) -> MarketHistoryPoint | None:
+def _baseline(
+    points: list[MarketHistoryPoint], target: datetime
+) -> MarketHistoryPoint | None:
     candidates = [item for item in points if item.observed_at <= target]
     return candidates[-1] if candidates else None
 
