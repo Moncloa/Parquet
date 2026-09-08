@@ -52,6 +52,12 @@ class EtoroConfig(BaseModel):
     history_sample_seconds: int = Field(default=20, ge=10, le=300)
     history_retention_minutes: int = Field(default=120, ge=15, le=1440)
     history_context_points: int = Field(default=30, ge=10, le=100)
+    websocket_enabled: bool = True
+    websocket_url: str = "wss://ws.etoro.com/ws"
+    websocket_universe_size: int = Field(default=500, ge=20, le=5000)
+    websocket_shortlist_size: int = Field(default=20, ge=5, le=100)
+    websocket_rotation_minutes: int = Field(default=15, ge=5, le=240)
+    websocket_points_per_instrument: int = Field(default=240, ge=20, le=2000)
 
 
 class StrategyConfig(BaseModel):

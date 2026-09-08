@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from typing import Any
 
 from parquet.execution.autonomous import AutonomousExecutionCoordinator
 from parquet.models import MarketObservation, TriggerAction, WatchItem
@@ -23,6 +25,93 @@ class AutonomousOrchestrator(Orchestrator):
             self.storage,
             self.position_manager,
         )
+
+    def _persist_stream_state(self, current: datetime) -> None:
+        super()._persist_stream_state(current)
+        scanner = self.stream_scanner
+        if scanner is None:
+            return
+        candidates = scanner.shortlist(
+            limit=self.settings.etoro.websocket_shortlist_size,
+            history_points=min(20, self.settings.etoro.history_context_points),
+        )
+        self.storage.set("websocket_shortlist_raw", json.dumps(candidates))
+        self.storage.set("websocket_shortlist_at", current.astimezone(UTC).isoformat())
+
+    async def _stream_context(self, current: datetime) -> tuple[dict[str, object], list[str]]:
+        context, symbols = await super()._stream_context(current)
+        live_candidates = context.get("candidates")
+        if isinstance(live_candidates, list) and live_candidates:
+            return context, symbols
+
+        candidates = self._stored_stream_candidates(current)
+        if not candidates or self.universe_client is None:
+            return context, symbols
+
+        ids = [int(item["instrument_id"]) for item in candidates]
+        try:
+            metadata = await self.universe_client.metadata(ids)
+        except Exception as exc:
+            self.storage.add_event(
+                "websocket_metadata_error",
+                json.dumps({"error": repr(exc), "source": "stored_shortlist"}),
+            )
+            return context, symbols
+
+        enriched: list[dict[str, object]] = []
+        stored_symbols: list[str] = []
+        for item in candidates:
+            instrument_id = int(item["instrument_id"])
+            meta = metadata.get(instrument_id)
+            symbol = None if meta is None else meta.symbol
+            name = None if meta is None else meta.name
+            if symbol:
+                self._instrument_ids[symbol.upper()] = instrument_id
+                stored_symbols.append(symbol)
+            enriched.append(
+                {
+                    **item,
+                    "symbol": symbol,
+                    "name": name,
+                    "instrument_type_id": None if meta is None else meta.instrument_type_id,
+                    "exchange_id": None if meta is None else meta.exchange_id,
+                }
+            )
+
+        restored = dict(context)
+        restored["source"] = "persisted_service_shortlist"
+        restored["candidates"] = enriched
+        restored["shortlist_at"] = self.storage.get("websocket_shortlist_at")
+        return restored, sorted(set(symbols) | set(stored_symbols))
+
+    def _stored_stream_candidates(self, current: datetime) -> list[dict[str, Any]]:
+        raw = self.storage.get("websocket_shortlist_raw")
+        if not raw:
+            return []
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, list):
+            return []
+
+        result: list[dict[str, Any]] = []
+        for raw_item in payload:
+            if not isinstance(raw_item, dict):
+                continue
+            item = {str(key): value for key, value in raw_item.items()}
+            if item.get("instrument_id") is None or not isinstance(item.get("last_at"), str):
+                continue
+            try:
+                last_at = datetime.fromisoformat(
+                    str(item["last_at"]).replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except ValueError:
+                continue
+            age = (current.astimezone(UTC) - last_at).total_seconds()
+            if 0 <= age <= self.settings.etoro.max_quote_age_seconds:
+                result.append(item)
+        return result[: self.settings.etoro.websocket_shortlist_size]
 
     def _handle_execute_watch(
         self,
