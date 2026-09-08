@@ -38,6 +38,31 @@ def test_parse_stream_tick_accepts_nested_payload() -> None:
     assert tick.observed_at == datetime(2026, 9, 8, 7, 0, tzinfo=UTC)
 
 
+def test_parse_stream_tick_accepts_documented_json_content() -> None:
+    tick = parse_stream_tick(
+        '{"topic":"instrument:32","content":"{\\"InstrumentID\\":32,'
+        '\\"Bid\\":25900.1,\\"Ask\\":25901.1,\\"LastExecution\\":25900.6,'
+        '\\"Date\\":\\"2026-09-08T12:00:00Z\\"}"}'
+    )
+
+    assert tick is not None
+    assert tick.instrument_id == 32
+    assert tick.bid == 25900.1
+    assert tick.ask == 25901.1
+    assert tick.price == 25900.6
+    assert tick.observed_at == datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+
+
+def test_parse_stream_tick_accepts_content_inside_data() -> None:
+    tick = parse_stream_tick(
+        '{"topic":"instrument:32","data":{"content":"{\\"InstrumentID\\":32,'
+        '\\"Bid\\":100,\\"Ask\\":102,\\"Date\\":\\"2026-09-08T12:00:00Z\\"}"}}'
+    )
+
+    assert tick is not None
+    assert tick.price == 101.0
+
+
 def test_parse_stream_error_reports_failure_without_echoing_payload() -> None:
     error = parse_stream_error(
         '{"operation":"Authenticate","success":false,'
