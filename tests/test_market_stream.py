@@ -11,8 +11,10 @@ from parquet.market.stream import (
     StreamTick,
     build_websocket_request,
     classify_stream_frame,
+    classify_stream_shape,
     parse_stream_error,
     parse_stream_tick,
+    parse_stream_ticks,
 )
 from parquet.market.universe import EtoroUniverseClient, rotate_universe
 
@@ -89,11 +91,49 @@ def test_parse_stream_tick_accepts_channel_quote_numeric_instrument() -> None:
     assert tick.observed_at.tzinfo == UTC
 
 
+def test_parse_stream_ticks_accepts_top_level_batch() -> None:
+    ticks = parse_stream_ticks(
+        '[{"topic":"instrument:32","data":{"bid":100,"ask":102}},'
+        '{"topic":"instrument:33","data":{"bid":200,"ask":204}}]'
+    )
+
+    assert [tick.instrument_id for tick in ticks] == [32, 33]
+    assert [tick.price for tick in ticks] == [101.0, 202.0]
+
+
 def test_classify_stream_frame_uses_safe_protocol_metadata() -> None:
     assert classify_stream_frame('{"type":"quote","instrument":"AAPL"}') == "type:quote"
     assert classify_stream_frame('{"topic":"instrument:32","content":"secret"}') == (
         "topic:instrument"
     )
+    assert classify_stream_frame('[{"topic":"instrument:32"}]') == "json_list"
+
+
+def test_classify_stream_shape_reports_only_structure() -> None:
+    shape = classify_stream_shape(
+        '{"topic":"instrument:32","data":{"Bid":100,"Ask":101,'
+        '"apiKey":"do-not-leak"},"token":"also-secret"}'
+    )
+
+    assert "topic" in shape
+    assert "data[" in shape
+    assert "Bid" in shape
+    assert "Ask" in shape
+    assert "do-not-leak" not in shape
+    assert "also-secret" not in shape
+    assert "<credential-field>" in shape
+
+
+def test_classify_stream_shape_describes_json_list() -> None:
+    shape = classify_stream_shape(
+        '[{"instrumentId":32,"bid":100,"ask":101},'
+        '{"instrumentId":33,"bid":200,"ask":201}]'
+    )
+
+    assert shape.startswith("list[len=2;")
+    assert "instrumentId" in shape
+    assert "bid" in shape
+    assert "ask" in shape
 
 
 def test_parse_stream_error_reports_failure_without_echoing_payload() -> None:
@@ -118,6 +158,15 @@ def test_parse_stream_error_reports_nested_safe_fields() -> None:
         "code=BAD_REQUEST, message=missing id"
     )
     assert "secret-user-key" not in error
+
+
+def test_parse_stream_error_accepts_batched_control_error() -> None:
+    error = parse_stream_error(
+        '[{"operation":"Subscribe","success":true},'
+        '{"operation":"Subscribe","success":false,"message":"bad topic"}]'
+    )
+
+    assert error == "eToro WebSocket Subscribe failed: message=bad topic"
 
 
 def test_parse_stream_error_ignores_successful_control_message() -> None:
