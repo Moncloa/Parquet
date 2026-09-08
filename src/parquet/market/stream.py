@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -67,6 +68,7 @@ class EtoroWebSocketScanner:
         self.incoming_message_count = 0
         self.parsed_tick_count = 0
         self.frame_type_counts: dict[str, int] = defaultdict(int)
+        self.frame_shape_counts: dict[str, int] = defaultdict(int)
         self.last_error: str | None = None
         self._metadata_client = EtoroUniverseClient(
             api_key=api_key,
@@ -97,6 +99,7 @@ class EtoroWebSocketScanner:
         self.incoming_message_count = 0
         self.parsed_tick_count = 0
         self.frame_type_counts = defaultdict(int)
+        self.frame_shape_counts = defaultdict(int)
         self.last_message_at = None
         self.last_tick_at = None
         self.last_error = None
@@ -163,6 +166,7 @@ class EtoroWebSocketScanner:
                     )
                 )
 
+            # Compatibility subscription retained while the live wire format is diagnosed.
             symbols = [
                 self.symbol_by_id[instrument_id]
                 for instrument_id in self.instrument_ids
@@ -188,21 +192,28 @@ class EtoroWebSocketScanner:
                 received_at = datetime.now(UTC)
                 self.last_message_at = received_at
                 self.incoming_message_count += 1
-                self.frame_type_counts[classify_stream_frame(raw)] += 1
+                self._count_label(self.frame_type_counts, classify_stream_frame(raw))
+                self._count_label(self.frame_shape_counts, classify_stream_shape(raw))
 
                 wire_error = parse_stream_error(raw)
                 if wire_error is not None:
                     self.last_error = wire_error
 
-                tick = parse_stream_tick(raw, self.id_by_symbol)
-                if tick is None or tick.instrument_id not in active_ids:
-                    continue
-                self.series[tick.instrument_id].append(tick)
-                self.last_tick_at = received_at
-                self.parsed_tick_count += 1
-                self.last_error = None
-                if self.on_tick is not None:
-                    await self.on_tick(tick)
+                for tick in parse_stream_ticks(raw, self.id_by_symbol):
+                    if tick.instrument_id not in active_ids:
+                        continue
+                    self.series[tick.instrument_id].append(tick)
+                    self.last_tick_at = received_at
+                    self.parsed_tick_count += 1
+                    self.last_error = None
+                    if self.on_tick is not None:
+                        await self.on_tick(tick)
+
+    @staticmethod
+    def _count_label(counter: dict[str, int], label: str, *, max_labels: int = 24) -> None:
+        if label not in counter and len(counter) >= max_labels:
+            label = "other_shapes"
+        counter[label] += 1
 
     def shortlist(self, limit: int = 20, history_points: int = 20) -> list[dict[str, Any]]:
         ranked: list[dict[str, Any]] = []
@@ -258,33 +269,59 @@ class EtoroWebSocketScanner:
 def classify_stream_frame(raw: str | bytes) -> str:
     """Classify a frame using only safe protocol metadata."""
 
-    payload = _json_dict(raw)
-    if payload is None:
+    payload = _json_value(raw)
+    if payload is _INVALID_JSON:
         return "non_json"
-    message_type = _first_scalar((payload,), "type")
+    if isinstance(payload, list):
+        return "json_list"
+    if not isinstance(payload, dict):
+        return f"json_{type(payload).__name__}"
+    normalized = _normalize_dict(payload)
+    message_type = _first_scalar((normalized,), "type")
     if isinstance(message_type, str):
         return f"type:{message_type.lower()[:40]}"
-    operation = _first_scalar((payload,), "operation")
+    operation = _first_scalar((normalized,), "operation")
     if isinstance(operation, str):
         return f"operation:{operation.lower()[:40]}"
-    action = _first_scalar((payload,), "action")
+    action = _first_scalar((normalized,), "action")
     if isinstance(action, str):
         return f"action:{action.lower()[:40]}"
-    topic = _first_scalar((payload,), "topic", "Topic")
+    topic = _first_scalar((normalized,), "topic", "Topic")
     if isinstance(topic, str):
         return "topic:instrument" if topic.startswith("instrument:") else "topic:other"
-    if "content" in payload:
+    if "content" in normalized:
         return "content"
     return "other"
+
+
+def classify_stream_shape(raw: str | bytes) -> str:
+    """Describe only container types and key names; never include frame values."""
+
+    payload = _json_value(raw)
+    if payload is _INVALID_JSON:
+        return "non_json:bytes" if isinstance(raw, bytes) else "non_json:text"
+    return _shape_for_value(payload)
 
 
 def parse_stream_error(raw: str | bytes) -> str | None:
     """Return a redacted server-side error summary, if the frame clearly represents one."""
 
-    payload = _json_dict(raw)
-    if payload is None:
+    payload = _json_value(raw)
+    if payload is _INVALID_JSON:
         return None
+    candidates: list[dict[str, Any]] = []
+    if isinstance(payload, dict):
+        candidates.append(_normalize_dict(payload))
+    elif isinstance(payload, list):
+        candidates.extend(_normalize_dict(item) for item in payload if isinstance(item, dict))
+    for candidate in candidates:
+        result = _parse_stream_error_payload(candidate)
+        if result is not None:
+            return result
+    return None
 
+
+def _parse_stream_error_payload(payload: dict[str, Any]) -> str | None:
     data = _nested_dict(payload.get("data"))
     content = _content_dict(payload, data)
     sources = (payload, data, content)
@@ -313,16 +350,44 @@ def parse_stream_error(raw: str | bytes) -> str | None:
     return f"eToro WebSocket {operation_text} failed{suffix}"
 
 
+def parse_stream_ticks(
+    raw: str | bytes,
+    symbol_to_instrument_id: dict[str, int] | None = None,
+) -> list[StreamTick]:
+    """Parse one tick or a JSON batch of ticks from a WebSocket frame."""
+
+    payload = _json_value(raw)
+    if payload is _INVALID_JSON:
+        return []
+    if isinstance(payload, dict):
+        candidates = [_normalize_dict(payload)]
+    elif isinstance(payload, list):
+        candidates = [_normalize_dict(item) for item in payload if isinstance(item, dict)]
+    else:
+        return []
+
+    ticks: list[StreamTick] = []
+    for candidate in candidates:
+        tick = _parse_stream_tick_payload(candidate, symbol_to_instrument_id)
+        if tick is not None:
+            ticks.append(tick)
+    return ticks
+
+
 def parse_stream_tick(
     raw: str | bytes,
     symbol_to_instrument_id: dict[str, int] | None = None,
 ) -> StreamTick | None:
-    """Parse topic/content pushes and channel-based quote messages."""
+    """Compatibility wrapper returning the first tick found in a frame."""
 
-    payload = _json_dict(raw)
-    if payload is None:
-        return None
+    ticks = parse_stream_ticks(raw, symbol_to_instrument_id)
+    return None if not ticks else ticks[0]
 
+
+def _parse_stream_tick_payload(
+    payload: dict[str, Any],
+    symbol_to_instrument_id: dict[str, int] | None,
+) -> StreamTick | None:
     data = _nested_dict(payload.get("data"))
     content = _content_dict(payload, data)
     sources = (content, data, payload)
@@ -386,34 +451,95 @@ def parse_stream_tick(
     )
 
 
-def _json_dict(raw: str | bytes) -> dict[str, Any] | None:
+_INVALID_JSON = object()
+_SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
+
+
+def _json_value(raw: str | bytes) -> Any:
     try:
-        payload = json.loads(raw)
+        return json.loads(raw)
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-        return None
+        return _INVALID_JSON
+
+
+def _json_dict(raw: str | bytes) -> dict[str, Any] | None:
+    payload = _json_value(raw)
     if not isinstance(payload, dict):
         return None
-    return {str(key): value for key, value in payload.items()}
+    return _normalize_dict(payload)
+
+
+def _normalize_dict(value: dict[Any, Any]) -> dict[str, Any]:
+    return {str(key): item for key, item in value.items()}
 
 
 def _nested_dict(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {str(key): item for key, item in value.items()}
+    return _normalize_dict(value)
 
 
 def _content_dict(payload: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     raw_content = payload.get("content", data.get("content"))
     if isinstance(raw_content, dict):
-        return {str(key): value for key, value in raw_content.items()}
+        return _normalize_dict(raw_content)
     if isinstance(raw_content, str):
-        try:
-            decoded = json.loads(raw_content)
-        except json.JSONDecodeError:
-            return {}
+        decoded = _json_value(raw_content)
         if isinstance(decoded, dict):
-            return {str(key): value for key, value in decoded.items()}
+            return _normalize_dict(decoded)
     return {}
+
+
+def _shape_for_value(value: Any) -> str:
+    if isinstance(value, dict):
+        normalized = _normalize_dict(value)
+        parts = [f"dict[{_safe_key_signature(normalized)}]"]
+        for key in ("data", "content", "payload", "message"):
+            nested = normalized.get(key)
+            if isinstance(nested, dict):
+                parts.append(f"{key}[{_safe_key_signature(_normalize_dict(nested))}]")
+            elif isinstance(nested, str):
+                decoded = _json_value(nested)
+                if isinstance(decoded, dict):
+                    parts.append(f"{key}:json[{_safe_key_signature(_normalize_dict(decoded))}]")
+                elif isinstance(decoded, list):
+                    parts.append(f"{key}:json_list[{_list_item_shape(decoded)}]")
+        return "/".join(parts)[:360]
+    if isinstance(value, list):
+        return f"list[len={len(value)};{_list_item_shape(value)}]"[:360]
+    if value is None:
+        return "json:null"
+    return f"json:{type(value).__name__}"
+
+
+def _list_item_shape(items: list[Any]) -> str:
+    if not items:
+        return "empty"
+    kinds: list[str] = []
+    for item in items[:3]:
+        if isinstance(item, dict):
+            kinds.append(f"dict[{_safe_key_signature(_normalize_dict(item))}]")
+        elif isinstance(item, list):
+            kinds.append("list")
+        elif item is None:
+            kinds.append("null")
+        else:
+            kinds.append(type(item).__name__)
+    return "items=" + ",".join(kinds)
+
+
+def _safe_key_signature(value: dict[str, Any], *, limit: int = 10) -> str:
+    keys = sorted(_safe_key_name(key) for key in value)[:limit]
+    suffix = ",..." if len(value) > limit else ""
+    return ",".join(keys) + suffix
+
+
+def _safe_key_name(key: str) -> str:
+    lowered = key.lower()
+    if any(token in lowered for token in ("apikey", "userkey", "token", "secret", "password")):
+        return "<credential-field>"
+    cleaned = _SAFE_KEY_RE.sub("?", key)[:40]
+    return cleaned or "<empty-key>"
 
 
 def _first_value(sources: tuple[dict[str, Any], ...], *keys: str) -> Any:
