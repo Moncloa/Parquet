@@ -33,6 +33,8 @@ class ExecutionAttempt(BaseModel):
     instrument_id: int = Field(gt=0)
     side: str = Field(min_length=1)
     amount_usd: float = Field(gt=0)
+    leverage: int = Field(default=1, ge=1)
+    settlement_type: str | None = None
     stop_loss: float = Field(gt=0)
     take_profit: float | None = Field(default=None, gt=0)
     created_at: datetime
@@ -42,6 +44,10 @@ class ExecutionAttempt(BaseModel):
     broker_order_id: str | None = None
     broker_position_id: str | None = None
     reason: str | None = None
+
+    @property
+    def exposure_usd(self) -> float:
+        return self.amount_usd * self.leverage
 
 
 class AutonomousExecutionCoordinator:
@@ -59,6 +65,8 @@ class AutonomousExecutionCoordinator:
         observation: MarketObservation,
         decision: ExecutionDecision,
         now: datetime | None = None,
+        leverage: int = 1,
+        settlement_type: str | None = None,
     ) -> ExecutionAttempt:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         self.assert_no_uncertain_execution()
@@ -70,6 +78,8 @@ class AutonomousExecutionCoordinator:
             raise RuntimeError("Cannot prepare execution without broker instrument id")
         if proposal.stop_loss is None:
             raise RuntimeError("Cannot prepare execution without stop loss")
+        if leverage < 1:
+            raise RuntimeError("Cannot prepare execution with invalid leverage")
 
         self.position_manager.assert_trading_enabled(now=current)
         existing = self.storage.get_active_execution_attempt_for_proposal(proposal.proposal_id)
@@ -84,6 +94,8 @@ class AutonomousExecutionCoordinator:
             instrument_id=observation.instrument_id,
             side=proposal.side.value,
             amount_usd=decision.amount_usd,
+            leverage=leverage,
+            settlement_type=settlement_type,
             stop_loss=proposal.stop_loss,
             take_profit=proposal.take_profit,
             created_at=current,
