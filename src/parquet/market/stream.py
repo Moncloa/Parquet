@@ -24,7 +24,7 @@ class StreamTick:
 
 
 def build_websocket_request(operation: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Build one eToro WebSocket command with the documented correlation GUID."""
+    """Build one eToro WebSocket command with a correlation GUID."""
 
     return {
         "id": str(uuid4()),
@@ -51,22 +51,46 @@ class EtoroWebSocketScanner:
         self.max_points_per_instrument = max_points_per_instrument
         self.on_tick = on_tick
         self.instrument_ids: list[int] = []
+        self.symbol_by_id: dict[int, str] = {}
+        self.id_by_symbol: dict[str, int] = {}
         self.universe_started_at: datetime | None = None
         self.series: dict[int, deque[StreamTick]] = defaultdict(
             lambda: deque(maxlen=self.max_points_per_instrument)
         )
         self.connected = False
-        # Wire-level observability: this advances for every application frame received,
-        # even if the current tick parser does not recognize its schema.
         self.last_message_at: datetime | None = None
         self.last_tick_at: datetime | None = None
         self.incoming_message_count = 0
         self.parsed_tick_count = 0
+        self.frame_type_counts: dict[str, int] = defaultdict(int)
         self.last_error: str | None = None
 
-    def set_universe(self, instrument_ids: list[int], *, now: datetime | None = None) -> None:
+    def set_universe(
+        self,
+        instrument_ids: list[int],
+        *,
+        symbol_by_id: dict[int, str] | None = None,
+        now: datetime | None = None,
+    ) -> None:
         self.instrument_ids = sorted(set(instrument_ids))
+        supplied = symbol_by_id or {}
+        active_ids = set(self.instrument_ids)
+        self.symbol_by_id = {
+            instrument_id: symbol
+            for instrument_id, symbol in supplied.items()
+            if instrument_id in active_ids and symbol
+        }
+        self.id_by_symbol = {
+            symbol.upper(): instrument_id
+            for instrument_id, symbol in self.symbol_by_id.items()
+        }
         self.universe_started_at = (now or datetime.now(UTC)).astimezone(UTC)
+        self.incoming_message_count = 0
+        self.parsed_tick_count = 0
+        self.frame_type_counts = defaultdict(int)
+        self.last_message_at = None
+        self.last_tick_at = None
+        self.last_error = None
 
     async def run_forever(self) -> None:
         backoff = 1.0
@@ -83,7 +107,17 @@ class EtoroWebSocketScanner:
                 backoff = min(backoff * 2.0, 30.0)
 
     async def _run_once(self) -> None:
-        async with websockets.connect(self.url, ping_interval=20, ping_timeout=20) as socket:
+        headers = {
+            "x-api-key": self.api_key,
+            "x-user-key": self.user_key,
+        }
+        async with websockets.connect(
+            self.url,
+            additional_headers=headers,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as socket:
+            # Topic-based protocol documented in the API quick reference.
             await socket.send(
                 json.dumps(
                     build_websocket_request(
@@ -105,21 +139,48 @@ class EtoroWebSocketScanner:
                         )
                     )
                 )
+
+            # Channel-based protocol documented in the current WebSocket guide.
+            symbols = [
+                self.symbol_by_id[instrument_id]
+                for instrument_id in self.instrument_ids
+                if instrument_id in self.symbol_by_id
+            ]
+            for start in range(0, len(symbols), 100):
+                batch = symbols[start : start + 100]
+                await socket.send(
+                    json.dumps(
+                        {
+                            "action": "subscribe",
+                            "channels": ["quotes"],
+                            "instruments": batch,
+                        }
+                    )
+                )
+
             self.connected = True
             self.last_error = None
             async for raw in socket:
                 received_at = datetime.now(UTC)
                 self.last_message_at = received_at
                 self.incoming_message_count += 1
+                self.frame_type_counts[classify_stream_frame(raw)] += 1
+
                 wire_error = parse_stream_error(raw)
                 if wire_error is not None:
                     self.last_error = wire_error
-                tick = parse_stream_tick(raw)
+
+                tick = parse_stream_tick(raw, self.id_by_symbol)
                 if tick is None:
+                    continue
+                if tick.instrument_id not in set(self.instrument_ids):
                     continue
                 self.series[tick.instrument_id].append(tick)
                 self.last_tick_at = received_at
                 self.parsed_tick_count += 1
+                # If one of the compatibility subscription forms was rejected but the
+                # other is producing usable ticks, the market-data path is healthy.
+                self.last_error = None
                 if self.on_tick is not None:
                     await self.on_tick(tick)
 
@@ -155,6 +216,7 @@ class EtoroWebSocketScanner:
             ranked.append(
                 {
                     "instrument_id": instrument_id,
+                    "symbol": self.symbol_by_id.get(instrument_id),
                     "price": last.price,
                     "change_pct_stream": round(change_pct, 5),
                     "step_volatility_bps": round(volatility, 4),
@@ -173,6 +235,29 @@ class EtoroWebSocketScanner:
         return ranked[:limit]
 
 
+def classify_stream_frame(raw: str | bytes) -> str:
+    """Classify a frame using only safe protocol metadata."""
+
+    payload = _json_dict(raw)
+    if payload is None:
+        return "non_json"
+    message_type = _first_scalar((payload,), "type")
+    if isinstance(message_type, str):
+        return f"type:{message_type.lower()[:40]}"
+    operation = _first_scalar((payload,), "operation")
+    if isinstance(operation, str):
+        return f"operation:{operation.lower()[:40]}"
+    action = _first_scalar((payload,), "action")
+    if isinstance(action, str):
+        return f"action:{action.lower()[:40]}"
+    topic = _first_scalar((payload,), "topic", "Topic")
+    if isinstance(topic, str):
+        return "topic:instrument" if topic.startswith("instrument:") else "topic:other"
+    if "content" in payload:
+        return "content"
+    return "other"
+
+
 def parse_stream_error(raw: str | bytes) -> str | None:
     """Return a redacted server-side error summary, if the frame clearly represents one."""
 
@@ -184,7 +269,7 @@ def parse_stream_error(raw: str | bytes) -> str | None:
     content = _content_dict(payload, data)
     sources = (payload, data, content)
 
-    operation = _first_scalar(sources, "operation", "type", "event")
+    operation = _first_scalar(sources, "operation", "type", "event", "action")
     success = _first_value(sources, "success", "isSucceeded", "isSuccess")
     status = _first_scalar(sources, "status")
     explicitly_failed = success is False or (
@@ -208,8 +293,11 @@ def parse_stream_error(raw: str | bytes) -> str | None:
     return f"eToro WebSocket {operation_text} failed{suffix}"
 
 
-def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
-    """Parse both legacy/direct and documented JSON-in-`content` instrument pushes."""
+def parse_stream_tick(
+    raw: str | bytes,
+    symbol_to_instrument_id: dict[str, int] | None = None,
+) -> StreamTick | None:
+    """Parse topic/content pushes and channel-based quote messages."""
 
     payload = _json_dict(raw)
     if payload is None:
@@ -227,6 +315,13 @@ def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
         "InstrumentID",
         "InstrumentId",
     )
+    instrument = _first_scalar(sources, "instrument", "Instrument", "symbol", "Symbol")
+    if instrument_id is None and instrument is not None:
+        try:
+            instrument_id = int(instrument)
+        except (TypeError, ValueError):
+            mapping = symbol_to_instrument_id or {}
+            instrument_id = mapping.get(str(instrument).upper())
     if instrument_id is None and isinstance(topic, str) and topic.startswith("instrument:"):
         try:
             instrument_id = int(topic.split(":", 1)[1])
@@ -253,7 +348,15 @@ def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
     if price is None:
         return None
 
-    timestamp_value = _first_value(sources, "timestamp", "Timestamp", "date", "Date")
+    timestamp_value = _first_value(
+        sources,
+        "timestamp",
+        "Timestamp",
+        "date",
+        "Date",
+        "time",
+        "Time",
+    )
     return StreamTick(
         instrument_id=instrument_id,
         observed_at=_timestamp(timestamp_value),
@@ -342,6 +445,14 @@ def _downsample(points: list[StreamTick], max_points: int) -> list[StreamTick]:
 
 
 def _timestamp(value: Any) -> datetime:
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if seconds > 10_000_000_000:
+            seconds /= 1000.0
+        try:
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            pass
     if isinstance(value, str):
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
