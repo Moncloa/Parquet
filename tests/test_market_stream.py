@@ -10,6 +10,7 @@ from parquet.market.stream import (
     EtoroWebSocketScanner,
     StreamTick,
     build_websocket_request,
+    classify_stream_frame,
     parse_stream_error,
     parse_stream_tick,
 )
@@ -63,6 +64,38 @@ def test_parse_stream_tick_accepts_content_inside_data() -> None:
     assert tick.price == 101.0
 
 
+def test_parse_stream_tick_accepts_channel_quote_by_symbol() -> None:
+    tick = parse_stream_tick(
+        '{"type":"quote","instrument":"GER40","bid":25900.1,"ask":25901.1,'
+        '"timestamp":"2026-09-08T12:00:00Z"}',
+        {"GER40": 32},
+    )
+
+    assert tick is not None
+    assert tick.instrument_id == 32
+    assert tick.bid == 25900.1
+    assert tick.ask == 25901.1
+    assert tick.price == 25900.6
+
+
+def test_parse_stream_tick_accepts_channel_quote_numeric_instrument() -> None:
+    tick = parse_stream_tick(
+        '{"type":"quote","instrument":32,"bid":100,"ask":102,"time":1788868800000}'
+    )
+
+    assert tick is not None
+    assert tick.instrument_id == 32
+    assert tick.price == 101.0
+    assert tick.observed_at.tzinfo == UTC
+
+
+def test_classify_stream_frame_uses_safe_protocol_metadata() -> None:
+    assert classify_stream_frame('{"type":"quote","instrument":"AAPL"}') == "type:quote"
+    assert classify_stream_frame('{"topic":"instrument:32","content":"secret"}') == (
+        "topic:instrument"
+    )
+
+
 def test_parse_stream_error_reports_failure_without_echoing_payload() -> None:
     error = parse_stream_error(
         '{"operation":"Authenticate","success":false,'
@@ -89,6 +122,13 @@ def test_parse_stream_error_reports_nested_safe_fields() -> None:
 
 def test_parse_stream_error_ignores_successful_control_message() -> None:
     assert parse_stream_error('{"operation":"Authenticate","success":true}') is None
+
+
+def test_scanner_set_universe_builds_symbol_reverse_map() -> None:
+    scanner = EtoroWebSocketScanner(api_key="api", user_key="user")
+    scanner.set_universe([32, 1001], symbol_by_id={32: "GER40", 1001: "AAPL"})
+
+    assert scanner.id_by_symbol == {"GER40": 32, "AAPL": 1001}
 
 
 def test_scanner_shortlist_ranks_current_universe_and_includes_history() -> None:
