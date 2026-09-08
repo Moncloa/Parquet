@@ -30,8 +30,10 @@ class PreparedRealSmallTicket:
     eligibility: EtoroEligibilityResult
     costs: EtoroCostResult
     settlement_type: str
+    leverage: int
     broker_minimum_usd: float | None
     maximum_safe_amount_usd: float
+    exposure_usd: float
 
 
 def recent_proposals(storage: Storage, *, limit: int = 20) -> list[ProposalRecord]:
@@ -55,6 +57,7 @@ def choose_real_small_amount(
     broker_minimum_usd: float | None,
     requested_amount_usd: float | None = None,
 ) -> tuple[float, float]:
+    """Choose capital amount when gate_maximum_usd is already capital-denominated."""
     if gate_maximum_usd <= 0 or supervised_cap_usd <= 0:
         raise RuntimeError("No positive amount remains after supervised and risk caps")
     maximum_safe = min(gate_maximum_usd, supervised_cap_usd)
@@ -90,6 +93,72 @@ def choose_real_small_amount(
             f"{maximum_safe:.2f} USD"
         )
     return chosen_amount, maximum_safe
+
+
+def choose_leverage_terms(
+    eligibility: EtoroEligibilityResult,
+    *,
+    direction: str,
+    gate_maximum_notional_usd: float,
+    supervised_cap_usd: float,
+    max_leverage: int,
+    requested_amount_usd: float | None = None,
+) -> tuple[int, str, float | None, float, float]:
+    """Pick the lowest broker leverage that satisfies capital and notional limits."""
+    if gate_maximum_notional_usd <= 0 or supervised_cap_usd <= 0:
+        raise RuntimeError("No positive amount remains after supervised and risk caps")
+    if max_leverage < 1:
+        raise RuntimeError("Maximum supervised leverage must be positive")
+    if requested_amount_usd is not None and requested_amount_usd <= 0:
+        raise RuntimeError("Requested amount must be positive")
+
+    allowed = [
+        leverage
+        for leverage in eligibility.allowed_leverages(direction=direction)
+        if leverage <= max_leverage
+    ]
+    if not allowed:
+        raise RuntimeError(
+            f"eToro offers no {direction.upper()} leverage at or below x{max_leverage}"
+        )
+
+    diagnostics: list[str] = []
+    for leverage in allowed:
+        broker_minimum = eligibility.minimum_amount(direction=direction, leverage=leverage)
+        maximum_capital = min(
+            supervised_cap_usd,
+            gate_maximum_notional_usd / leverage,
+        )
+        if maximum_capital <= 0:
+            continue
+
+        if requested_amount_usd is None:
+            chosen = broker_minimum if broker_minimum is not None else min(10.0, maximum_capital)
+        else:
+            chosen = requested_amount_usd
+
+        if broker_minimum is not None and chosen < broker_minimum:
+            diagnostics.append(
+                f"x{leverage}: minimum {broker_minimum:.2f} > amount {chosen:.2f}"
+            )
+            continue
+        if chosen > maximum_capital:
+            diagnostics.append(
+                f"x{leverage}: amount {chosen:.2f} > maximum capital {maximum_capital:.2f}"
+            )
+            continue
+        if chosen * leverage > gate_maximum_notional_usd + 1e-9:
+            diagnostics.append(f"x{leverage}: notional exceeds risk gate")
+            continue
+
+        settlement_type = eligibility.settlement_type(
+            direction=direction,
+            leverage=leverage,
+        )
+        return leverage, settlement_type, broker_minimum, chosen, maximum_capital
+
+    detail = "; ".join(diagnostics) or "no viable broker configuration"
+    raise RuntimeError(f"No leverage satisfies supervised and risk limits: {detail}")
 
 
 def validate_what_if_costs(
@@ -166,7 +235,7 @@ async def prepare_real_small_ticket(
         reasons = ", ".join(decision.reasons) or "unknown"
         raise RuntimeError(f"Execution gate rejected proposal: {reasons}")
     if decision.amount_usd is None or decision.amount_usd <= 0:
-        raise RuntimeError("Execution gate did not produce a positive maximum amount")
+        raise RuntimeError("Execution gate did not produce a positive maximum notional")
 
     execution_client = _execution_client(settings)
     eligibility = await execution_client.instrument_eligibility(instrument_id=instrument_id)
@@ -174,14 +243,17 @@ async def prepare_real_small_ticket(
         raise RuntimeError(f"eToro does not allow opening instrument {instrument_id}")
 
     direction = "LONG" if proposal.side == Side.BUY else "SHORT"
-    broker_minimum = eligibility.minimum_amount(direction=direction, leverage=1)
-    settlement_type = eligibility.settlement_type(direction=direction, leverage=1)
-    chosen_amount, maximum_safe = choose_real_small_amount(
-        gate_maximum_usd=decision.amount_usd,
-        supervised_cap_usd=settings.execution.supervised_real_max_amount_usd,
-        broker_minimum_usd=broker_minimum,
-        requested_amount_usd=requested_amount_usd,
+    leverage, settlement_type, broker_minimum, chosen_amount, maximum_safe = (
+        choose_leverage_terms(
+            eligibility,
+            direction=direction,
+            gate_maximum_notional_usd=decision.amount_usd,
+            supervised_cap_usd=settings.execution.supervised_real_max_amount_usd,
+            max_leverage=settings.execution.supervised_real_max_leverage,
+            requested_amount_usd=requested_amount_usd,
+        )
     )
+    exposure_usd = chosen_amount * leverage
 
     costs = await execution_client.what_if_open_costs(
         transaction="buy" if proposal.side == Side.BUY else "sellShort",
@@ -190,7 +262,7 @@ async def prepare_real_small_ticket(
         amount_usd=chosen_amount,
         stop_loss_rate=proposal.stop_loss,
         take_profit_rate=proposal.take_profit,
-        leverage=1,
+        leverage=leverage,
     )
     validate_what_if_costs(
         costs,
@@ -206,6 +278,8 @@ async def prepare_real_small_ticket(
         observation=observation,
         decision=capped_decision,
         now=now,
+        leverage=leverage,
+        settlement_type=settlement_type,
     )
     return PreparedRealSmallTicket(
         attempt=attempt,
@@ -215,8 +289,10 @@ async def prepare_real_small_ticket(
         eligibility=eligibility,
         costs=costs,
         settlement_type=settlement_type,
+        leverage=leverage,
         broker_minimum_usd=broker_minimum,
         maximum_safe_amount_usd=maximum_safe,
+        exposure_usd=exposure_usd,
     )
 
 

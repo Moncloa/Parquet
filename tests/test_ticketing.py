@@ -17,7 +17,11 @@ from parquet.live_test import run_live_test
 from parquet.market.etoro import InstrumentRate, InstrumentSearchHit
 from parquet.models import Side, TradeProposal
 from parquet.storage import Storage
-from parquet.tickets import choose_real_small_amount, prepare_real_small_ticket
+from parquet.tickets import (
+    choose_leverage_terms,
+    choose_real_small_amount,
+    prepare_real_small_ticket,
+)
 
 
 def _eligibility(*, minimum: float = 10.0) -> EtoroEligibilityResult:
@@ -33,6 +37,37 @@ def _eligibility(*, minimum: float = 10.0) -> EtoroEligibilityResult:
                 "direction": "LONG",
                 "leverageValues": [1, 2],
                 "minPositionAmount": minimum,
+            },
+        ),
+        response={},
+    )
+
+
+def _ger40_eligibility() -> EtoroEligibilityResult:
+    return EtoroEligibilityResult(
+        request_id="ger40",
+        instrument_id=32,
+        symbol="GER40",
+        min_position_exposure=1000.0,
+        allow_open_position=True,
+        leverage_configs=(
+            {
+                "direction": "long",
+                "settlementType": "cfd",
+                "leverageValues": [1],
+                "minPositionAmount": 50.0,
+            },
+            {
+                "direction": "short",
+                "settlementType": "cfd",
+                "leverageValues": [1, 2, 5, 10, 20],
+                "minPositionAmount": 50.0,
+            },
+            {
+                "direction": "long",
+                "settlementType": "cfd",
+                "leverageValues": [2, 5, 10, 20],
+                "minPositionAmount": 50.0,
             },
         ),
         response={},
@@ -63,6 +98,43 @@ def test_eligibility_requires_direction_and_leverage() -> None:
     assert eligibility.minimum_amount(direction="LONG", leverage=1) == 10.0
     with pytest.raises(RuntimeError, match="SHORT instrument"):
         eligibility.minimum_amount(direction="SHORT", leverage=1)
+
+
+def test_ger40_minimum_amount_uses_exposure_divided_by_leverage() -> None:
+    eligibility = _ger40_eligibility()
+    assert eligibility.minimum_amount(direction="LONG", leverage=1) == 1000.0
+    assert eligibility.minimum_amount(direction="LONG", leverage=2) == 500.0
+    assert eligibility.minimum_amount(direction="LONG", leverage=5) == 200.0
+    assert eligibility.minimum_amount(direction="LONG", leverage=10) == 100.0
+    assert eligibility.minimum_amount(direction="LONG", leverage=20) == 50.0
+
+
+def test_choose_leverage_terms_picks_lowest_viable_ger40_leverage() -> None:
+    eligibility = _ger40_eligibility()
+    leverage, settlement, minimum, amount, maximum = choose_leverage_terms(
+        eligibility,
+        direction="LONG",
+        gate_maximum_notional_usd=1000.0,
+        supervised_cap_usd=50.0,
+        max_leverage=20,
+    )
+    assert leverage == 20
+    assert settlement == "cfd"
+    assert minimum == 50.0
+    assert amount == 50.0
+    assert maximum == 50.0
+    assert amount * leverage == 1000.0
+
+
+def test_choose_leverage_terms_rejects_ger40_under_25_cap() -> None:
+    with pytest.raises(RuntimeError, match="No leverage satisfies"):
+        choose_leverage_terms(
+            _ger40_eligibility(),
+            direction="LONG",
+            gate_maximum_notional_usd=1000.0,
+            supervised_cap_usd=25.0,
+            max_leverage=20,
+        )
 
 
 @pytest.mark.asyncio
@@ -193,6 +265,7 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
             assert kwargs["instrument_id"] == 100
             assert kwargs["settlement_type"] == "CFD"
             assert kwargs["amount_usd"] == 10.0
+            assert kwargs["leverage"] == 1
             return EtoroCostResult(
                 request_id="cost-1",
                 instrument_id=100,
@@ -233,8 +306,12 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
 
     assert ticket.attempt.state == ExecutionAttemptState.PREPARED
     assert ticket.attempt.amount_usd == 10.0
+    assert ticket.attempt.leverage == 1
+    assert ticket.attempt.settlement_type == "CFD"
     assert ticket.broker_minimum_usd == 10.0
     assert ticket.maximum_safe_amount_usd == 25.0
     assert ticket.settlement_type == "CFD"
+    assert ticket.leverage == 1
+    assert ticket.exposure_usd == 10.0
     assert ticket.costs.total_usd == pytest.approx(0.05)
     assert ticket.attempt.broker_request_id is None
