@@ -24,7 +24,7 @@ class StreamTick:
 
 
 def build_websocket_request(operation: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Build one eToro WebSocket command with the correlation GUID used by official examples."""
+    """Build one eToro WebSocket command with the documented correlation GUID."""
 
     return {
         "id": str(uuid4()),
@@ -176,29 +176,20 @@ class EtoroWebSocketScanner:
 def parse_stream_error(raw: str | bytes) -> str | None:
     """Return a redacted server-side error summary, if the frame clearly represents one."""
 
-    try:
-        payload = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(payload, dict):
+    payload = _json_dict(raw)
+    if payload is None:
         return None
 
-    normalized = {str(key): value for key, value in payload.items()}
-    raw_data = normalized.get("data")
-    data = (
-        {str(key): value for key, value in raw_data.items()}
-        if isinstance(raw_data, dict)
-        else {}
-    )
+    data = _nested_dict(payload.get("data"))
+    content = _content_dict(payload, data)
+    sources = (payload, data, content)
 
-    operation = _first_scalar(normalized, data, "operation", "type", "event")
-    success = _first_value(normalized, data, "success", "isSucceeded", "isSuccess")
-    status = _first_scalar(normalized, data, "status")
+    operation = _first_scalar(sources, "operation", "type", "event")
+    success = _first_value(sources, "success", "isSucceeded", "isSuccess")
+    status = _first_scalar(sources, "status")
     explicitly_failed = success is False or (
         isinstance(status, str) and status.lower() in {"error", "failed", "failure", "rejected"}
-    ) or (
-        isinstance(operation, str) and "error" in operation.lower()
-    )
+    ) or (isinstance(operation, str) and "error" in operation.lower())
     if not explicitly_failed:
         return None
 
@@ -206,10 +197,10 @@ def parse_stream_error(raw: str | bytes) -> str | None:
     safe_parts: list[str] = []
     if status is not None:
         safe_parts.append(f"status={str(status)[:80]}")
-    code = _first_scalar(normalized, data, "code", "errorCode", "error_code")
+    code = _first_scalar(sources, "code", "errorCode", "error_code")
     if code is not None:
         safe_parts.append(f"code={str(code)[:80]}")
-    detail = _first_scalar(normalized, data, "error", "message", "reason", "description")
+    detail = _first_scalar(sources, "error", "message", "reason", "description")
     if detail is not None:
         safe_parts.append(f"message={str(detail)[:240]}")
 
@@ -218,24 +209,24 @@ def parse_stream_error(raw: str | bytes) -> str | None:
 
 
 def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
-    try:
-        payload = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(payload, dict):
+    """Parse both legacy/direct and documented JSON-in-`content` instrument pushes."""
+
+    payload = _json_dict(raw)
+    if payload is None:
         return None
 
-    normalized_payload: dict[str, Any] = {
-        str(key): value for key, value in payload.items()
-    }
-    raw_data = normalized_payload.get("data")
-    if isinstance(raw_data, dict):
-        data: dict[str, Any] = {str(key): value for key, value in raw_data.items()}
-    else:
-        data = normalized_payload
+    data = _nested_dict(payload.get("data"))
+    content = _content_dict(payload, data)
+    sources = (content, data, payload)
 
-    topic = normalized_payload.get("topic") or normalized_payload.get("Topic")
-    instrument_id = _int_value(data, "instrumentId", "instrumentID", "InstrumentID")
+    topic = _first_scalar(sources, "topic", "Topic")
+    instrument_id = _first_int(
+        sources,
+        "instrumentId",
+        "instrumentID",
+        "InstrumentID",
+        "InstrumentId",
+    )
     if instrument_id is None and isinstance(topic, str) and topic.startswith("instrument:"):
         try:
             instrument_id = int(topic.split(":", 1)[1])
@@ -244,30 +235,66 @@ def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
     if instrument_id is None:
         return None
 
-    bid = _float_value(data, "bid", "Bid")
-    ask = _float_value(data, "ask", "Ask")
-    price = _float_value(data, "lastPrice", "lastExecution", "rate", "price", "Price")
+    bid = _first_float(sources, "bid", "Bid")
+    ask = _first_float(sources, "ask", "Ask")
+    price = _first_float(
+        sources,
+        "lastPrice",
+        "LastPrice",
+        "lastExecution",
+        "LastExecution",
+        "rate",
+        "Rate",
+        "price",
+        "Price",
+    )
     if price is None and bid is not None and ask is not None:
         price = (bid + ask) / 2.0
     if price is None:
         return None
 
-    timestamp = _timestamp(data.get("timestamp") or data.get("date") or data.get("Timestamp"))
+    timestamp_value = _first_value(sources, "timestamp", "Timestamp", "date", "Date")
     return StreamTick(
         instrument_id=instrument_id,
-        observed_at=timestamp,
+        observed_at=_timestamp(timestamp_value),
         price=price,
         bid=bid,
         ask=ask,
     )
 
 
-def _first_value(
-    primary: dict[str, Any],
-    secondary: dict[str, Any],
-    *keys: str,
-) -> Any:
-    for source in (primary, secondary):
+def _json_dict(raw: str | bytes) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {str(key): value for key, value in payload.items()}
+
+
+def _nested_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in value.items()}
+
+
+def _content_dict(payload: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+    raw_content = payload.get("content", data.get("content"))
+    if isinstance(raw_content, dict):
+        return {str(key): value for key, value in raw_content.items()}
+    if isinstance(raw_content, str):
+        try:
+            decoded = json.loads(raw_content)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(decoded, dict):
+            return {str(key): value for key, value in decoded.items()}
+    return {}
+
+
+def _first_value(sources: tuple[dict[str, Any], ...], *keys: str) -> Any:
+    for source in sources:
         for key in keys:
             if key in source:
                 return source[key]
@@ -275,14 +302,33 @@ def _first_value(
 
 
 def _first_scalar(
-    primary: dict[str, Any],
-    secondary: dict[str, Any],
+    sources: tuple[dict[str, Any], ...],
     *keys: str,
 ) -> str | int | float | bool | None:
-    value = _first_value(primary, secondary, *keys)
+    value = _first_value(sources, *keys)
     if isinstance(value, (str, int, float, bool)):
         return value
     return None
+
+
+def _first_int(sources: tuple[dict[str, Any], ...], *keys: str) -> int | None:
+    value = _first_value(sources, *keys)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_float(sources: tuple[dict[str, Any], ...], *keys: str) -> float | None:
+    value = _first_value(sources, *keys)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _downsample(points: list[StreamTick], max_points: int) -> list[StreamTick]:
@@ -293,20 +339,6 @@ def _downsample(points: list[StreamTick], max_points: int) -> list[StreamTick]:
     if sampled[-1].observed_at != points[-1].observed_at:
         sampled.append(points[-1])
     return sampled[-max_points:]
-
-
-def _int_value(data: dict[str, Any], *keys: str) -> int | None:
-    for key in keys:
-        if data.get(key) is not None:
-            return int(data[key])
-    return None
-
-
-def _float_value(data: dict[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        if data.get(key) is not None:
-            return float(data[key])
-    return None
 
 
 def _timestamp(value: Any) -> datetime:
