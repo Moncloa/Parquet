@@ -7,6 +7,9 @@ import pytest
 from parquet.config import EtoroConfig, ExecutionConfig, Settings
 from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
 from parquet.execution.etoro import (
+    EtoroCostComponent,
+    EtoroCostResult,
+    EtoroEligibilityResult,
     EtoroExecutionError,
     EtoroExecutionTransportError,
     EtoroIdentity,
@@ -58,9 +61,46 @@ class BaseClient:
             ),
         )
 
+    async def instrument_eligibility(self, *, instrument_id: int) -> EtoroEligibilityResult:
+        assert instrument_id == 100
+        return EtoroEligibilityResult(
+            request_id="eligibility",
+            instrument_id=100,
+            symbol="NSDQ100",
+            min_position_exposure=20.0,
+            allow_open_position=True,
+            leverage_configs=(
+                {
+                    "direction": "LONG",
+                    "settlementType": "cfd",
+                    "leverageValues": [2],
+                    "minPositionAmount": 10.0,
+                },
+            ),
+            response={},
+        )
+
+    async def what_if_open_costs(self, **kwargs) -> EtoroCostResult:
+        assert kwargs["instrument_id"] == 100
+        assert kwargs["settlement_type"] == "cfd"
+        assert kwargs["leverage"] == 2
+        assert kwargs["amount_usd"] == 10.0
+        return EtoroCostResult(
+            request_id="costs",
+            instrument_id=100,
+            symbol="NSDQ100",
+            costs=(EtoroCostComponent("marketSpread", 0.05, "USD"),),
+            last_updated=datetime.now(UTC),
+            response={},
+        )
+
 
 class SuccessClient(BaseClient):
+    def __init__(self) -> None:
+        self.submitted: dict[str, object] | None = None
+
     async def open_market_order(self, **kwargs):
+        self.submitted = dict(kwargs)
         request_id = str(kwargs["request_id"])
         return EtoroOrderResult(
             request_id=request_id,
@@ -153,6 +193,8 @@ def _attempt(*, amount: float = 10.0) -> ExecutionAttempt:
         instrument_id=100,
         side="buy",
         amount_usd=amount,
+        leverage=2,
+        settlement_type="cfd",
         stop_loss=29_400.0,
         take_profit=29_600.0,
         created_at=now,
@@ -170,6 +212,7 @@ def _adapter(tmp_path, client, snapshots):
         execution=ExecutionConfig(
             supervised_real_enabled=True,
             supervised_real_max_amount_usd=25.0,
+            supervised_real_max_leverage=20,
             broker_lookup_attempts=2,
             broker_lookup_interval_seconds=0,
         ),
@@ -193,6 +236,7 @@ def _filled_snapshot() -> BrokerPortfolioSnapshot:
                 symbol="NSDQ100",
                 side="buy",
                 amount_usd=10.0,
+                leverage=2,
             )
         ]
     )
@@ -200,9 +244,10 @@ def _filled_snapshot() -> BrokerPortfolioSnapshot:
 
 @pytest.mark.asyncio
 async def test_supervised_real_success_reconciles_position(tmp_path) -> None:
+    client = SuccessClient()
     adapter, storage, reconciliation = _adapter(
         tmp_path,
-        SuccessClient(),
+        client,
         [_snapshot(), _filled_snapshot()],
     )
 
@@ -218,9 +263,13 @@ async def test_supervised_real_success_reconciles_position(tmp_path) -> None:
     assert reconciliation.calls == 2
     assert storage.get("execution_uncertain") == "0"
     assert storage.get("etoro_authenticated_gcid") == "123"
+    assert client.submitted is not None
+    assert client.submitted["leverage"] == 2
+    assert client.submitted["settlement_type"] == "cfd"
     managed = storage.active_managed_positions()
     assert len(managed) == 1
     assert managed[0].broker_position_id == "pos-1"
+    assert managed[0].leverage == 2
 
 
 @pytest.mark.asyncio
@@ -291,6 +340,17 @@ async def test_supervised_real_enforces_small_amount_cap(tmp_path) -> None:
             _attempt(amount=25.01),
             confirmation="REAL attempt-1",
         )
+
+    assert reconciliation.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_supervised_real_blocks_ticket_without_persisted_settlement(tmp_path) -> None:
+    adapter, _, reconciliation = _adapter(tmp_path, SuccessClient(), [_snapshot()])
+    attempt = _attempt().model_copy(update={"settlement_type": None})
+
+    with pytest.raises(RuntimeError, match="settlement_type"):
+        await adapter.execute(attempt, confirmation="REAL attempt-1")
 
     assert reconciliation.calls == 0
 
