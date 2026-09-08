@@ -5,7 +5,12 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from parquet.market.stream import EtoroWebSocketScanner, StreamTick, parse_stream_tick
+from parquet.market.stream import (
+    EtoroWebSocketScanner,
+    StreamTick,
+    parse_stream_error,
+    parse_stream_tick,
+)
 from parquet.market.universe import EtoroUniverseClient, rotate_universe
 
 
@@ -18,6 +23,20 @@ def test_parse_stream_tick_accepts_nested_payload() -> None:
     assert tick.instrument_id == 123
     assert tick.price == 100.0
     assert tick.observed_at == datetime(2026, 9, 8, 7, 0, tzinfo=UTC)
+
+
+def test_parse_stream_error_reports_failure_without_echoing_payload() -> None:
+    error = parse_stream_error(
+        '{"operation":"Authenticate","success":false,'
+        '"message":"not allowed","apiKey":"secret-value"}'
+    )
+
+    assert error == "eToro WebSocket Authenticate failed: not allowed"
+    assert "secret-value" not in error
+
+
+def test_parse_stream_error_ignores_successful_control_message() -> None:
+    assert parse_stream_error('{"operation":"Authenticate","success":true}') is None
 
 
 def test_scanner_shortlist_ranks_current_universe_and_includes_history() -> None:

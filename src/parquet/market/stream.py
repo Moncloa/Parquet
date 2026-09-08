@@ -45,7 +45,12 @@ class EtoroWebSocketScanner:
             lambda: deque(maxlen=self.max_points_per_instrument)
         )
         self.connected = False
+        # Wire-level observability: this advances for every application frame received,
+        # even if the current tick parser does not recognize its schema.
         self.last_message_at: datetime | None = None
+        self.last_tick_at: datetime | None = None
+        self.incoming_message_count = 0
+        self.parsed_tick_count = 0
         self.last_error: str | None = None
 
     def set_universe(self, instrument_ids: list[int], *, now: datetime | None = None) -> None:
@@ -92,11 +97,18 @@ class EtoroWebSocketScanner:
             self.connected = True
             self.last_error = None
             async for raw in socket:
+                received_at = datetime.now(UTC)
+                self.last_message_at = received_at
+                self.incoming_message_count += 1
+                wire_error = parse_stream_error(raw)
+                if wire_error is not None:
+                    self.last_error = wire_error
                 tick = parse_stream_tick(raw)
                 if tick is None:
                     continue
                 self.series[tick.instrument_id].append(tick)
-                self.last_message_at = datetime.now(UTC)
+                self.last_tick_at = received_at
+                self.parsed_tick_count += 1
                 if self.on_tick is not None:
                     await self.on_tick(tick)
 
@@ -148,6 +160,36 @@ class EtoroWebSocketScanner:
             )
         ranked.sort(key=lambda item: float(item["score"] or 0.0), reverse=True)
         return ranked[:limit]
+
+
+def parse_stream_error(raw: str | bytes) -> str | None:
+    """Return a redacted server-side error summary, if the frame clearly represents one."""
+
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    normalized = {str(key): value for key, value in payload.items()}
+    operation = normalized.get("operation") or normalized.get("type") or normalized.get("event")
+    success = normalized.get("success")
+    status = normalized.get("status")
+    error = normalized.get("error") or normalized.get("message")
+    explicitly_failed = success is False or (
+        isinstance(status, str) and status.lower() in {"error", "failed", "failure", "rejected"}
+    ) or (
+        isinstance(operation, str) and "error" in operation.lower()
+    )
+    if not explicitly_failed:
+        return None
+    operation_text = "websocket" if operation is None else str(operation)
+    # Never serialize the whole server frame here: an auth acknowledgement could echo
+    # credential-shaped fields. Only retain a short scalar error/message string.
+    if isinstance(error, (str, int, float, bool)):
+        detail = str(error)[:240]
+        return f"eToro WebSocket {operation_text} failed: {detail}"
+    return f"eToro WebSocket {operation_text} failed"
 
 
 def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
