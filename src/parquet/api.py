@@ -73,6 +73,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             and not execution_uncertain
         )
         strategy = _strategy_state(settings, orchestrator)
+        websocket = _websocket_state(orchestrator)
         return {
             "status": "ok",
             "mode": settings.mode,
@@ -85,14 +86,14 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
             "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
             "websocket_enabled": settings.etoro.websocket_enabled,
-            "websocket_connected": orchestrator.storage.get("websocket_connected") == "1",
-            "websocket_subscribed_instruments": _optional_int(
-                orchestrator.storage.get("websocket_universe_subscribed_count")
-            ),
-            "websocket_last_message_at": (
-                orchestrator.storage.get("websocket_last_message_at") or None
-            ),
-            "websocket_last_error": orchestrator.storage.get("websocket_last_error") or None,
+            "websocket_connected": websocket["connected"],
+            "websocket_subscribed_instruments": websocket["subscribed_instruments"],
+            "websocket_streamed_instruments": websocket["streamed_instruments"],
+            "websocket_incoming_message_count": websocket["incoming_message_count"],
+            "websocket_parsed_tick_count": websocket["parsed_tick_count"],
+            "websocket_last_message_at": websocket["last_message_at"],
+            "websocket_last_tick_at": websocket["last_tick_at"],
+            "websocket_last_error": websocket["last_error"],
             "strategy_enabled": settings.strategy.enabled,
             "strategy_provider": settings.strategy.provider,
             "strategy_worker_ready": strategy["worker_ready"],
@@ -140,6 +141,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             and not execution_uncertain
         )
         strategy = _strategy_state(settings, orchestrator)
+        websocket = _websocket_state(orchestrator)
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
@@ -182,20 +184,20 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
             "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
             "websocket_enabled": settings.etoro.websocket_enabled,
-            "websocket_connected": orchestrator.storage.get("websocket_connected") == "1",
+            "websocket_connected": websocket["connected"],
             "websocket_open_universe": _optional_int(
                 orchestrator.storage.get("websocket_universe_open_count")
             ),
-            "websocket_subscribed_instruments": _optional_int(
-                orchestrator.storage.get("websocket_universe_subscribed_count")
-            ),
+            "websocket_subscribed_instruments": websocket["subscribed_instruments"],
+            "websocket_streamed_instruments": websocket["streamed_instruments"],
+            "websocket_incoming_message_count": websocket["incoming_message_count"],
+            "websocket_parsed_tick_count": websocket["parsed_tick_count"],
             "websocket_last_rotation_at": (
                 orchestrator.storage.get("websocket_last_rotation_at") or None
             ),
-            "websocket_last_message_at": (
-                orchestrator.storage.get("websocket_last_message_at") or None
-            ),
-            "websocket_last_error": orchestrator.storage.get("websocket_last_error") or None,
+            "websocket_last_message_at": websocket["last_message_at"],
+            "websocket_last_tick_at": websocket["last_tick_at"],
+            "websocket_last_error": websocket["last_error"],
             "websocket_last_error_at": (
                 orchestrator.storage.get("websocket_last_error_at") or None
             ),
@@ -234,6 +236,35 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         }
 
     return app
+
+
+def _websocket_state(orchestrator: Orchestrator) -> dict[str, object]:
+    scanner = orchestrator.stream_scanner
+    if scanner is None:
+        return {
+            "connected": False,
+            "subscribed_instruments": _optional_int(
+                orchestrator.storage.get("websocket_universe_subscribed_count")
+            ),
+            "streamed_instruments": 0,
+            "incoming_message_count": 0,
+            "parsed_tick_count": 0,
+            "last_message_at": orchestrator.storage.get("websocket_last_message_at") or None,
+            "last_tick_at": None,
+            "last_error": orchestrator.storage.get("websocket_last_error") or None,
+        }
+    return {
+        "connected": scanner.connected,
+        "subscribed_instruments": len(scanner.instrument_ids),
+        "streamed_instruments": len(scanner.series),
+        "incoming_message_count": scanner.incoming_message_count,
+        "parsed_tick_count": scanner.parsed_tick_count,
+        "last_message_at": (
+            None if scanner.last_message_at is None else scanner.last_message_at.isoformat()
+        ),
+        "last_tick_at": None if scanner.last_tick_at is None else scanner.last_tick_at.isoformat(),
+        "last_error": scanner.last_error,
+    }
 
 
 def _strategy_state(settings: Settings, orchestrator: Orchestrator) -> dict[str, object]:
