@@ -70,6 +70,7 @@ class ExecutionConfig(BaseModel):
     autonomous_mode: str = "shadow"
     supervised_real_enabled: bool = False
     supervised_real_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
+    supervised_real_max_leverage: int = Field(default=20, ge=1, le=100)
     broker_lookup_attempts: int = Field(default=10, ge=1, le=60)
     broker_lookup_interval_seconds: float = Field(default=0.5, ge=0.0, le=5.0)
 
