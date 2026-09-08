@@ -22,8 +22,8 @@ def test_parse_stream_tick_accepts_nested_payload() -> None:
 
 def test_scanner_shortlist_ranks_current_universe_and_includes_history() -> None:
     scanner = EtoroWebSocketScanner(api_key="api", user_key="user")
-    scanner.set_universe([1, 2])
     now = datetime(2026, 9, 8, 7, 0, tzinfo=UTC)
+    scanner.set_universe([1, 2], now=now)
     scanner.series[1].extend(
         [
             StreamTick(1, now, 100.0, 99.9, 100.1),
@@ -48,6 +48,30 @@ def test_scanner_shortlist_ranks_current_universe_and_includes_history() -> None
     assert [item["instrument_id"] for item in shortlist] == [1, 2]
     assert shortlist[0]["change_pct_stream"] == 2.0
     assert len(shortlist[0]["points"]) == 2
+
+
+def test_scanner_does_not_join_discontinuous_rotation_history() -> None:
+    scanner = EtoroWebSocketScanner(api_key="api", user_key="user")
+    old = datetime(2026, 9, 8, 6, 0, tzinfo=UTC)
+    new = datetime(2026, 9, 8, 7, 0, tzinfo=UTC)
+    scanner.series[1].extend(
+        [
+            StreamTick(1, old, 90.0),
+            StreamTick(1, old + timedelta(seconds=20), 95.0),
+        ]
+    )
+    scanner.set_universe([1], now=new)
+    scanner.series[1].extend(
+        [
+            StreamTick(1, new, 100.0),
+            StreamTick(1, new + timedelta(seconds=20), 101.0),
+        ]
+    )
+
+    shortlist = scanner.shortlist(limit=1)
+
+    assert shortlist[0]["sample_count"] == 2
+    assert shortlist[0]["change_pct_stream"] == 1.0
 
 
 def test_rotate_universe_keeps_pinned_and_rotates() -> None:
