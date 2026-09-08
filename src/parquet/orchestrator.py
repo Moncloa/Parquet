@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,8 @@ from parquet.config import Settings
 from parquet.execution import ExecutionGate
 from parquet.market.etoro import EtoroMarketDataClient, InstrumentRate
 from parquet.market.history import MarketHistoryStore
+from parquet.market.stream import EtoroWebSocketScanner
+from parquet.market.universe import EtoroUniverseClient, rotate_universe
 from parquet.models import (
     MarketAnalysis,
     MarketObservation,
@@ -56,6 +59,28 @@ class Orchestrator:
         }
         self._last_account_poll_at: datetime | None = None
         self._last_history_poll_at: datetime | None = None
+        self._last_stream_rotation_at: datetime | None = None
+        self._stream_task: asyncio.Task[None] | None = None
+        try:
+            self._stream_offset = int(self.storage.get("websocket_universe_offset") or 0)
+        except ValueError:
+            self._stream_offset = 0
+        self.universe_client: EtoroUniverseClient | None = None
+        self.stream_scanner: EtoroWebSocketScanner | None = None
+        if settings.etoro.enabled and settings.etoro.websocket_enabled:
+            api_key = _read_secret(settings.etoro.api_key_file, "eToro API key")
+            user_key = _read_secret(settings.etoro.user_key_file, "eToro User key")
+            self.universe_client = EtoroUniverseClient(
+                api_key=api_key,
+                user_key=user_key,
+                base_url=settings.etoro.base_url,
+            )
+            self.stream_scanner = EtoroWebSocketScanner(
+                api_key=api_key,
+                user_key=user_key,
+                url=settings.etoro.websocket_url,
+                max_points_per_instrument=settings.etoro.websocket_points_per_instrument,
+            )
         self.ensure_structural_reviews()
 
     def _build_market_client(self) -> EtoroMarketDataClient | None:
@@ -344,6 +369,133 @@ class Orchestrator:
                 processed += 1
         return processed
 
+    async def poll_wide_market_once(self, now: datetime | None = None) -> int:
+        if self.stream_scanner is None or self.universe_client is None:
+            return 0
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        rotation_seconds = self.settings.etoro.websocket_rotation_minutes * 60
+        task_alive = self._stream_task is not None and not self._stream_task.done()
+        if (
+            task_alive
+            and self._last_stream_rotation_at is not None
+            and (current - self._last_stream_rotation_at).total_seconds() < rotation_seconds
+        ):
+            self._persist_stream_state(current)
+            return 0
+
+        try:
+            open_ids = await self.universe_client.open_instrument_ids()
+            pinned = list(
+                (
+                    await self._resolve_instrument_ids(
+                        sorted(set(self.settings.etoro.review_symbols))
+                    )
+                ).values()
+            )
+            selected, next_offset = rotate_universe(
+                open_ids,
+                offset=self._stream_offset,
+                limit=self.settings.etoro.websocket_universe_size,
+                pinned=pinned,
+            )
+            if not selected:
+                raise RuntimeError("eToro wide-market universe is empty")
+        except Exception as exc:
+            self.storage.set("websocket_last_error", repr(exc))
+            self.storage.set("websocket_last_error_at", current.isoformat())
+            return 0
+
+        if self._stream_task is not None:
+            self._stream_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._stream_task
+        self.stream_scanner.set_universe(selected)
+        self._stream_task = asyncio.create_task(
+            self.stream_scanner.run_forever(),
+            name="parquet-etoro-websocket",
+        )
+        self._stream_offset = next_offset
+        self._last_stream_rotation_at = current
+        self.storage.set("websocket_universe_offset", str(next_offset))
+        self.storage.set("websocket_universe_open_count", str(len(open_ids)))
+        self.storage.set("websocket_universe_subscribed_count", str(len(selected)))
+        self.storage.set("websocket_last_rotation_at", current.isoformat())
+        self.storage.set("websocket_last_error", "")
+        self._persist_stream_state(current)
+        return len(selected)
+
+    def _persist_stream_state(self, current: datetime) -> None:
+        scanner = self.stream_scanner
+        if scanner is None:
+            return
+        self.storage.set("websocket_connected", "1" if scanner.connected else "0")
+        self.storage.set(
+            "websocket_last_message_at",
+            "" if scanner.last_message_at is None else scanner.last_message_at.isoformat(),
+        )
+        if scanner.last_error:
+            self.storage.set("websocket_last_error", scanner.last_error)
+            self.storage.set("websocket_last_error_at", current.isoformat())
+
+    async def _stream_context(self, current: datetime) -> tuple[dict[str, object], list[str]]:
+        scanner = self.stream_scanner
+        universe_client = self.universe_client
+        if scanner is None or universe_client is None:
+            return {"enabled": False}, []
+
+        candidates = scanner.shortlist(
+            limit=self.settings.etoro.websocket_shortlist_size,
+            history_points=min(20, self.settings.etoro.history_context_points),
+        )
+        ids = [int(item["instrument_id"]) for item in candidates]
+        metadata = {}
+        if ids:
+            try:
+                metadata = await universe_client.metadata(ids)
+            except Exception as exc:
+                self.storage.add_event(
+                    "websocket_metadata_error",
+                    json.dumps({"error": repr(exc)}),
+                )
+
+        enriched: list[dict[str, object]] = []
+        symbols: list[str] = []
+        for item in candidates:
+            instrument_id = int(item["instrument_id"])
+            meta = metadata.get(instrument_id)
+            symbol = None if meta is None else meta.symbol
+            name = None if meta is None else meta.name
+            if symbol:
+                self._instrument_ids[symbol.upper()] = instrument_id
+                symbols.append(symbol)
+            enriched.append(
+                {
+                    **item,
+                    "symbol": symbol,
+                    "name": name,
+                    "instrument_type_id": None if meta is None else meta.instrument_type_id,
+                    "exchange_id": None if meta is None else meta.exchange_id,
+                }
+            )
+
+        self._persist_stream_state(current)
+        return (
+            {
+                "enabled": True,
+                "connected": scanner.connected,
+                "url": self.settings.etoro.websocket_url,
+                "subscribed_instruments": len(scanner.instrument_ids),
+                "streamed_instruments": len(scanner.series),
+                "last_message_at": (
+                    None if scanner.last_message_at is None else scanner.last_message_at.isoformat()
+                ),
+                "last_error": scanner.last_error,
+                "ranking": "abs_stream_change_plus_step_volatility",
+                "candidates": enriched,
+            },
+            symbols,
+        )
+
     async def _market_context(
         self,
         symbols: list[str],
@@ -387,9 +539,11 @@ class Orchestrator:
         return context
 
     async def poll_market_once(self, now: datetime | None = None) -> int:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        await self.poll_market_history_once(current)
+        await self.poll_wide_market_once(current)
         if self.market_client is None:
             return 0
-        current = (now or datetime.now(UTC)).astimezone(UTC)
         symbols = sorted({watch.symbol for watch in self.storage.active_watches(current)})
         if not symbols:
             return 0
@@ -424,6 +578,8 @@ class Orchestrator:
             return 0
         current = (now or datetime.now(UTC)).astimezone(UTC)
         due = self.reviews.due(current)
+        if not due:
+            return 0
 
         active_symbols = {watch.symbol for watch in self.storage.active_watches(current)}
         review_symbols = sorted(active_symbols | set(self.settings.etoro.review_symbols))
@@ -442,6 +598,17 @@ class Orchestrator:
                         "error": repr(exc),
                     }
                 }
+
+        stream_context, dynamic_symbols = await self._stream_context(current)
+        market_data = context.get("market_data")
+        if isinstance(market_data, dict):
+            market_data["wide_scanner"] = stream_context
+        else:
+            context["market_data"] = {
+                "provider": "etoro",
+                "wide_scanner": stream_context,
+            }
+        review_symbols = sorted(set(review_symbols) | set(dynamic_symbols))
 
         count = 0
         for review in due:
@@ -465,7 +632,6 @@ class Orchestrator:
                 await self.poll_github_once()
                 self.ensure_structural_reviews()
                 await self.poll_account_once()
-                await self.poll_market_history_once()
                 await self.poll_market_once()
                 await self.post_due_reviews()
             except Exception as exc:
