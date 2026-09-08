@@ -84,6 +84,15 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro_identity_verified": identity_verified,
             "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
             "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
+            "websocket_enabled": settings.etoro.websocket_enabled,
+            "websocket_connected": orchestrator.storage.get("websocket_connected") == "1",
+            "websocket_subscribed_instruments": _optional_int(
+                orchestrator.storage.get("websocket_universe_subscribed_count")
+            ),
+            "websocket_last_message_at": (
+                orchestrator.storage.get("websocket_last_message_at") or None
+            ),
+            "websocket_last_error": orchestrator.storage.get("websocket_last_error") or None,
             "strategy_enabled": settings.strategy.enabled,
             "strategy_provider": settings.strategy.provider,
             "strategy_worker_ready": strategy["worker_ready"],
@@ -172,6 +181,24 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "etoro_identity_verified": identity_verified,
             "etoro_identity_checked_at": orchestrator.storage.get("etoro_identity_checked_at"),
             "etoro_identity_error": orchestrator.storage.get("etoro_identity_error") or None,
+            "websocket_enabled": settings.etoro.websocket_enabled,
+            "websocket_connected": orchestrator.storage.get("websocket_connected") == "1",
+            "websocket_open_universe": _optional_int(
+                orchestrator.storage.get("websocket_universe_open_count")
+            ),
+            "websocket_subscribed_instruments": _optional_int(
+                orchestrator.storage.get("websocket_universe_subscribed_count")
+            ),
+            "websocket_last_rotation_at": (
+                orchestrator.storage.get("websocket_last_rotation_at") or None
+            ),
+            "websocket_last_message_at": (
+                orchestrator.storage.get("websocket_last_message_at") or None
+            ),
+            "websocket_last_error": orchestrator.storage.get("websocket_last_error") or None,
+            "websocket_last_error_at": (
+                orchestrator.storage.get("websocket_last_error_at") or None
+            ),
             "strategy_enabled": settings.strategy.enabled,
             "strategy_provider": settings.strategy.provider,
             "strategy_worker_ready": strategy["worker_ready"],
@@ -244,3 +271,12 @@ def _heartbeat_fresh(value: object) -> bool:
     except ValueError:
         return False
     return (datetime.now(UTC) - timestamp).total_seconds() <= 30
+
+
+def _optional_int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
