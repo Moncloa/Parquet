@@ -61,11 +61,28 @@ class EtoroEligibilityResult:
             f"{normalized_direction} instrument {self.instrument_id}"
         )
 
+    def allowed_leverages(self, *, direction: str) -> tuple[int, ...]:
+        normalized_direction = direction.upper()
+        values: set[int] = set()
+        for config in self.leverage_configs:
+            if str(config.get("direction", "")).upper() != normalized_direction:
+                continue
+            raw_values = config.get("leverageValues")
+            if not isinstance(raw_values, list):
+                continue
+            for value in raw_values:
+                parsed = int(value)
+                if parsed > 0:
+                    values.add(parsed)
+        return tuple(sorted(values))
+
     def minimum_amount(self, *, direction: str, leverage: int = 1) -> float | None:
+        if leverage <= 0:
+            raise ValueError("leverage must be positive")
+        config = self.matching_config(direction=direction, leverage=leverage)
         candidates: list[float] = []
         if self.min_position_exposure is not None:
-            candidates.append(self.min_position_exposure)
-        config = self.matching_config(direction=direction, leverage=leverage)
+            candidates.append(self.min_position_exposure / leverage)
         raw_minimum = config.get("minPositionAmount")
         if raw_minimum is not None:
             candidates.append(float(raw_minimum))
@@ -181,7 +198,10 @@ def market_order_payload(
     stop_loss_rate: float,
     take_profit_rate: float | None = None,
     settlement_type: str | None = None,
+    leverage: int = 1,
 ) -> dict[str, Any]:
+    if leverage <= 0:
+        raise ValueError("leverage must be positive")
     normalized = _normalize_open_transaction(transaction)
     payload: dict[str, Any] = {
         "action": "open",
@@ -190,7 +210,7 @@ def market_order_payload(
         "orderType": "mkt",
         "amount": amount_usd,
         "orderCurrency": "usd",
-        "leverage": 1,
+        "leverage": leverage,
         "stopLossRate": stop_loss_rate,
         "stopLossType": "fixed",
     }
@@ -208,6 +228,7 @@ def market_buy_payload(
     stop_loss_rate: float,
     take_profit_rate: float | None = None,
     settlement_type: str | None = None,
+    leverage: int = 1,
 ) -> dict[str, Any]:
     return market_order_payload(
         transaction="buy",
@@ -216,6 +237,7 @@ def market_buy_payload(
         stop_loss_rate=stop_loss_rate,
         take_profit_rate=take_profit_rate,
         settlement_type=settlement_type,
+        leverage=leverage,
     )
 
 
@@ -400,8 +422,6 @@ class EtoroExecutionClient:
                 )
             raw_value = item.get("value")
             if raw_value is None:
-                # Keep backward compatibility with the amount field used by
-                # earlier examples/mocks while preferring the real API shape.
                 raw_value = item.get("amount")
             if (
                 item.get("costType") is None
@@ -446,6 +466,7 @@ class EtoroExecutionClient:
         take_profit_rate: float | None = None,
         request_id: str | None = None,
         settlement_type: str | None = None,
+        leverage: int = 1,
     ) -> EtoroOrderResult:
         submission_request_id = request_id or str(uuid4())
         payload = market_order_payload(
@@ -455,6 +476,7 @@ class EtoroExecutionClient:
             stop_loss_rate=stop_loss_rate,
             take_profit_rate=take_profit_rate,
             settlement_type=settlement_type,
+            leverage=leverage,
         )
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
@@ -519,6 +541,7 @@ class EtoroExecutionClient:
         take_profit_rate: float | None = None,
         request_id: str | None = None,
         settlement_type: str | None = None,
+        leverage: int = 1,
     ) -> EtoroOrderResult:
         return await self.open_market_order(
             transaction="buy",
@@ -528,6 +551,7 @@ class EtoroExecutionClient:
             take_profit_rate=take_profit_rate,
             request_id=request_id,
             settlement_type=settlement_type,
+            leverage=leverage,
         )
 
 
