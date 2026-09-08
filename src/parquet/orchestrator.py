@@ -10,6 +10,7 @@ from parquet.bridge.github import GitHubBridge
 from parquet.config import Settings
 from parquet.execution import ExecutionGate
 from parquet.market.etoro import EtoroMarketDataClient, InstrumentRate
+from parquet.market.history import MarketHistoryStore
 from parquet.models import (
     MarketAnalysis,
     MarketObservation,
@@ -33,6 +34,7 @@ class Orchestrator:
     ) -> None:
         self.settings = settings
         self.storage = Storage(settings.state_db)
+        self.history = MarketHistoryStore(self.storage)
         self.watch_engine = WatchEngine()
         self.execution_gate = ExecutionGate(settings.risk, settings.etoro)
         self.reviews = ReviewQueue()
@@ -53,6 +55,7 @@ class Orchestrator:
             for symbol, instrument_id in settings.etoro.instrument_ids.items()
         }
         self._last_account_poll_at: datetime | None = None
+        self._last_history_poll_at: datetime | None = None
         self.ensure_structural_reviews()
 
     def _build_market_client(self) -> EtoroMarketDataClient | None:
@@ -298,6 +301,49 @@ class Orchestrator:
             if instrument_id in by_id
         }
 
+    def _record_rate(self, symbol: str, rate: InstrumentRate) -> bool:
+        price = _usable_price(rate)
+        if price is None:
+            return False
+        self.history.record(
+            MarketObservation(
+                symbol=symbol,
+                price=price,
+                observed_at=rate.timestamp,
+                instrument_id=rate.instrument_id,
+                bid=rate.bid,
+                ask=rate.ask,
+            ),
+            retention_minutes=self.settings.etoro.history_retention_minutes,
+        )
+        return True
+
+    async def poll_market_history_once(self, now: datetime | None = None) -> int:
+        if self.market_client is None:
+            return 0
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        if (
+            self._last_history_poll_at is not None
+            and (current - self._last_history_poll_at).total_seconds()
+            < self.settings.etoro.history_sample_seconds
+        ):
+            return 0
+        self._last_history_poll_at = current
+        active_symbols = {watch.symbol for watch in self.storage.active_watches(current)}
+        symbols = sorted(active_symbols | set(self.settings.etoro.review_symbols))
+        if not symbols:
+            return 0
+        try:
+            rates = await self._rates_for_symbols(symbols)
+        except Exception as exc:
+            self.storage.add_event("market_history_poll_error", json.dumps({"error": repr(exc)}))
+            return 0
+        processed = 0
+        for symbol, rate in rates.items():
+            if self._record_rate(symbol, rate):
+                processed += 1
+        return processed
+
     async def _market_context(
         self,
         symbols: list[str],
@@ -305,6 +351,7 @@ class Orchestrator:
     ) -> dict[str, object]:
         rates = await self._rates_for_symbols(symbols)
         quotes: dict[str, object] = {}
+        history: dict[str, object] = {}
         for symbol, rate in rates.items():
             age_seconds = max(0.0, (current.astimezone(UTC) - rate.timestamp).total_seconds())
             quotes[symbol] = {
@@ -317,12 +364,20 @@ class Orchestrator:
                 "age_seconds": round(age_seconds, 3),
                 "stale": age_seconds > self.settings.etoro.max_quote_age_seconds,
             }
+            self._record_rate(symbol, rate)
+            history[symbol] = self.history.context(
+                symbol,
+                now=current,
+                retention_minutes=self.settings.etoro.history_retention_minutes,
+                max_points=self.settings.etoro.history_context_points,
+            )
         unresolved = sorted(set(symbols) - set(rates))
         context: dict[str, object] = {
             "market_data": {
                 "provider": "etoro",
                 "captured_at": current.astimezone(UTC).isoformat(),
                 "quotes": quotes,
+                "history": history,
                 "unresolved_symbols": unresolved,
             }
         }
@@ -410,6 +465,7 @@ class Orchestrator:
                 await self.poll_github_once()
                 self.ensure_structural_reviews()
                 await self.poll_account_once()
+                await self.poll_market_history_once()
                 await self.poll_market_once()
                 await self.post_due_reviews()
             except Exception as exc:

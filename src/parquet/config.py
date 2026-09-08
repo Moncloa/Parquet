@@ -49,6 +49,9 @@ class EtoroConfig(BaseModel):
     instrument_ids: dict[str, int] = Field(default_factory=dict)
     max_quote_age_seconds: int = Field(default=120, ge=1, le=3600)
     account_poll_seconds: int = Field(default=60, ge=10, le=3600)
+    history_sample_seconds: int = Field(default=20, ge=10, le=300)
+    history_retention_minutes: int = Field(default=120, ge=15, le=1440)
+    history_context_points: int = Field(default=30, ge=10, le=100)
 
 
 class StrategyConfig(BaseModel):
