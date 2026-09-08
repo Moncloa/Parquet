@@ -40,6 +40,7 @@ class EtoroWebSocketScanner:
         self.max_points_per_instrument = max_points_per_instrument
         self.on_tick = on_tick
         self.instrument_ids: list[int] = []
+        self.universe_started_at: datetime | None = None
         self.series: dict[int, deque[StreamTick]] = defaultdict(
             lambda: deque(maxlen=self.max_points_per_instrument)
         )
@@ -47,8 +48,9 @@ class EtoroWebSocketScanner:
         self.last_message_at: datetime | None = None
         self.last_error: str | None = None
 
-    def set_universe(self, instrument_ids: list[int]) -> None:
+    def set_universe(self, instrument_ids: list[int], *, now: datetime | None = None) -> None:
         self.instrument_ids = sorted(set(instrument_ids))
+        self.universe_started_at = (now or datetime.now(UTC)).astimezone(UTC)
 
     async def run_forever(self) -> None:
         backoff = 1.0
@@ -101,7 +103,13 @@ class EtoroWebSocketScanner:
     def shortlist(self, limit: int = 20, history_points: int = 20) -> list[dict[str, Any]]:
         ranked: list[dict[str, Any]] = []
         active_ids = set(self.instrument_ids)
-        for instrument_id, points in self.series.items():
+        started_at = self.universe_started_at
+        for instrument_id, stored_points in self.series.items():
+            points = [
+                point
+                for point in stored_points
+                if started_at is None or point.observed_at >= started_at
+            ]
             if instrument_id not in active_ids or len(points) < 2:
                 continue
             first = points[0]
@@ -120,7 +128,7 @@ class EtoroWebSocketScanner:
             if last.bid is not None and last.ask is not None and last.price:
                 spread_bps = ((last.ask - last.bid) / last.price) * 10_000.0
             score = abs(change_pct) + min(volatility / 100.0, 5.0)
-            compact = _downsample(list(points), history_points)
+            compact = _downsample(points, history_points)
             ranked.append(
                 {
                     "instrument_id": instrument_id,
@@ -150,8 +158,16 @@ def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
     if not isinstance(payload, dict):
         return None
 
-    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-    topic = payload.get("topic") or payload.get("Topic")
+    normalized_payload: dict[str, Any] = {
+        str(key): value for key, value in payload.items()
+    }
+    raw_data = normalized_payload.get("data")
+    if isinstance(raw_data, dict):
+        data: dict[str, Any] = {str(key): value for key, value in raw_data.items()}
+    else:
+        data = normalized_payload
+
+    topic = normalized_payload.get("topic") or normalized_payload.get("Topic")
     instrument_id = _int_value(data, "instrumentId", "instrumentID", "InstrumentID")
     if instrument_id is None and isinstance(topic, str) and topic.startswith("instrument:"):
         try:
