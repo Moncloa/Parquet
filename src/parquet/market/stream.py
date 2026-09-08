@@ -13,6 +13,8 @@ from uuid import uuid4
 
 import websockets
 
+from parquet.market.universe import EtoroUniverseClient
+
 
 @dataclass(frozen=True)
 class StreamTick:
@@ -42,12 +44,14 @@ class EtoroWebSocketScanner:
         api_key: str,
         user_key: str,
         url: str = "wss://ws.etoro.com/ws",
+        market_base_url: str = "https://public-api.etoro.com/api/v1",
         max_points_per_instrument: int = 240,
         on_tick: Callable[[StreamTick], Awaitable[None]] | None = None,
     ) -> None:
         self.api_key = api_key
         self.user_key = user_key
         self.url = url
+        self.market_base_url = market_base_url
         self.max_points_per_instrument = max_points_per_instrument
         self.on_tick = on_tick
         self.instrument_ids: list[int] = []
@@ -64,6 +68,11 @@ class EtoroWebSocketScanner:
         self.parsed_tick_count = 0
         self.frame_type_counts: dict[str, int] = defaultdict(int)
         self.last_error: str | None = None
+        self._metadata_client = EtoroUniverseClient(
+            api_key=api_key,
+            user_key=user_key,
+            base_url=market_base_url,
+        )
 
     def set_universe(
         self,
@@ -106,7 +115,23 @@ class EtoroWebSocketScanner:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, 30.0)
 
+    async def _ensure_symbol_map(self) -> None:
+        missing = [value for value in self.instrument_ids if value not in self.symbol_by_id]
+        if not missing:
+            return
+        try:
+            metadata = await self._metadata_client.metadata(missing)
+        except Exception as exc:
+            # Topic-based streaming can still work without symbol metadata.
+            self.last_error = f"eToro WebSocket metadata lookup failed: {exc!r}"
+            return
+        for instrument_id, item in metadata.items():
+            if item.symbol:
+                self.symbol_by_id[instrument_id] = item.symbol
+                self.id_by_symbol[item.symbol.upper()] = instrument_id
+
     async def _run_once(self) -> None:
+        await self._ensure_symbol_map()
         headers = {
             "x-api-key": self.api_key,
             "x-user-key": self.user_key,
@@ -159,7 +184,9 @@ class EtoroWebSocketScanner:
                 )
 
             self.connected = True
-            self.last_error = None
+            if self.last_error and "metadata lookup" not in self.last_error:
+                self.last_error = None
+            active_ids = set(self.instrument_ids)
             async for raw in socket:
                 received_at = datetime.now(UTC)
                 self.last_message_at = received_at
@@ -171,15 +198,11 @@ class EtoroWebSocketScanner:
                     self.last_error = wire_error
 
                 tick = parse_stream_tick(raw, self.id_by_symbol)
-                if tick is None:
-                    continue
-                if tick.instrument_id not in set(self.instrument_ids):
+                if tick is None or tick.instrument_id not in active_ids:
                     continue
                 self.series[tick.instrument_id].append(tick)
                 self.last_tick_at = received_at
                 self.parsed_tick_count += 1
-                # If one of the compatibility subscription forms was rejected but the
-                # other is producing usable ticks, the market-data path is healthy.
                 self.last_error = None
                 if self.on_tick is not None:
                     await self.on_tick(tick)
