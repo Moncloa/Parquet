@@ -5,6 +5,7 @@ import json
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import ceil
 from statistics import pstdev
 from typing import Any, Awaitable, Callable
 
@@ -95,10 +96,11 @@ class EtoroWebSocketScanner:
                 if self.on_tick is not None:
                     await self.on_tick(tick)
 
-    def shortlist(self, limit: int = 20) -> list[dict[str, float | int | str | None]]:
-        ranked: list[dict[str, float | int | str | None]] = []
+    def shortlist(self, limit: int = 20, history_points: int = 20) -> list[dict[str, Any]]:
+        ranked: list[dict[str, Any]] = []
+        active_ids = set(self.instrument_ids)
         for instrument_id, points in self.series.items():
-            if len(points) < 2:
+            if instrument_id not in active_ids or len(points) < 2:
                 continue
             first = points[0]
             last = points[-1]
@@ -116,6 +118,7 @@ class EtoroWebSocketScanner:
             if last.bid is not None and last.ask is not None and last.price:
                 spread_bps = ((last.ask - last.bid) / last.price) * 10_000.0
             score = abs(change_pct) + min(volatility / 100.0, 5.0)
+            compact = _downsample(list(points), history_points)
             ranked.append(
                 {
                     "instrument_id": instrument_id,
@@ -127,6 +130,10 @@ class EtoroWebSocketScanner:
                     "first_at": first.observed_at.isoformat(),
                     "last_at": last.observed_at.isoformat(),
                     "score": round(score, 5),
+                    "points": [
+                        {"t": point.observed_at.isoformat(), "p": point.price}
+                        for point in compact
+                    ],
                 }
             )
         ranked.sort(key=lambda item: float(item["score"] or 0.0), reverse=True)
@@ -168,6 +175,16 @@ def parse_stream_tick(raw: str | bytes) -> StreamTick | None:
         bid=bid,
         ask=ask,
     )
+
+
+def _downsample(points: list[StreamTick], max_points: int) -> list[StreamTick]:
+    if len(points) <= max_points:
+        return points
+    stride = max(1, ceil((len(points) - 1) / (max_points - 1)))
+    sampled = points[::stride]
+    if sampled[-1].observed_at != points[-1].observed_at:
+        sampled.append(points[-1])
+    return sampled[-max_points:]
 
 
 def _int_value(data: dict[str, Any], *keys: str) -> int | None:
