@@ -73,13 +73,14 @@ class EtoroWebSocketScanner:
                     }
                 )
             )
-            if self.instrument_ids:
+            for start in range(0, len(self.instrument_ids), 100):
+                batch = self.instrument_ids[start : start + 100]
                 await socket.send(
                     json.dumps(
                         {
                             "operation": "Subscribe",
                             "data": {
-                                "topics": [f"instrument:{value}" for value in self.instrument_ids],
+                                "topics": [f"instrument:{value}" for value in batch],
                                 "snapshot": False,
                             },
                         }
