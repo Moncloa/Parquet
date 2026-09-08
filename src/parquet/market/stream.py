@@ -122,7 +122,6 @@ class EtoroWebSocketScanner:
         try:
             metadata = await self._metadata_client.metadata(missing)
         except Exception as exc:
-            # Topic-based streaming can still work without symbol metadata.
             self.last_error = f"eToro WebSocket metadata lookup failed: {exc!r}"
             return
         for instrument_id, item in metadata.items():
@@ -142,7 +141,6 @@ class EtoroWebSocketScanner:
             ping_interval=20,
             ping_timeout=20,
         ) as socket:
-            # Topic-based protocol documented in the API quick reference.
             await socket.send(
                 json.dumps(
                     build_websocket_request(
@@ -152,33 +150,32 @@ class EtoroWebSocketScanner:
                 )
             )
             for start in range(0, len(self.instrument_ids), 100):
-                batch = self.instrument_ids[start : start + 100]
+                id_batch = self.instrument_ids[start : start + 100]
                 await socket.send(
                     json.dumps(
                         build_websocket_request(
                             "Subscribe",
                             {
-                                "topics": [f"instrument:{value}" for value in batch],
+                                "topics": [f"instrument:{value}" for value in id_batch],
                                 "snapshot": False,
                             },
                         )
                     )
                 )
 
-            # Channel-based protocol documented in the current WebSocket guide.
             symbols = [
                 self.symbol_by_id[instrument_id]
                 for instrument_id in self.instrument_ids
                 if instrument_id in self.symbol_by_id
             ]
             for start in range(0, len(symbols), 100):
-                batch = symbols[start : start + 100]
+                symbol_batch = symbols[start : start + 100]
                 await socket.send(
                     json.dumps(
                         {
                             "action": "subscribe",
                             "channels": ["quotes"],
-                            "instruments": batch,
+                            "instruments": symbol_batch,
                         }
                     )
                 )
