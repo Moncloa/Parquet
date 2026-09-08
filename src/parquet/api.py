@@ -91,6 +91,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "websocket_streamed_instruments": websocket["streamed_instruments"],
             "websocket_incoming_message_count": websocket["incoming_message_count"],
             "websocket_parsed_tick_count": websocket["parsed_tick_count"],
+            "websocket_frame_type_counts": websocket["frame_type_counts"],
+            "websocket_frame_shape_counts": websocket["frame_shape_counts"],
             "websocket_last_message_at": websocket["last_message_at"],
             "websocket_last_tick_at": websocket["last_tick_at"],
             "websocket_last_error": websocket["last_error"],
@@ -192,6 +194,8 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "websocket_streamed_instruments": websocket["streamed_instruments"],
             "websocket_incoming_message_count": websocket["incoming_message_count"],
             "websocket_parsed_tick_count": websocket["parsed_tick_count"],
+            "websocket_frame_type_counts": websocket["frame_type_counts"],
+            "websocket_frame_shape_counts": websocket["frame_shape_counts"],
             "websocket_last_rotation_at": (
                 orchestrator.storage.get("websocket_last_rotation_at") or None
             ),
@@ -249,6 +253,8 @@ def _websocket_state(orchestrator: Orchestrator) -> dict[str, object]:
             "streamed_instruments": 0,
             "incoming_message_count": 0,
             "parsed_tick_count": 0,
+            "frame_type_counts": {},
+            "frame_shape_counts": {},
             "last_message_at": orchestrator.storage.get("websocket_last_message_at") or None,
             "last_tick_at": None,
             "last_error": orchestrator.storage.get("websocket_last_error") or None,
@@ -259,6 +265,8 @@ def _websocket_state(orchestrator: Orchestrator) -> dict[str, object]:
         "streamed_instruments": len(scanner.series),
         "incoming_message_count": scanner.incoming_message_count,
         "parsed_tick_count": scanner.parsed_tick_count,
+        "frame_type_counts": dict(sorted(scanner.frame_type_counts.items())),
+        "frame_shape_counts": dict(sorted(scanner.frame_shape_counts.items())),
         "last_message_at": (
             None if scanner.last_message_at is None else scanner.last_message_at.isoformat()
         ),
