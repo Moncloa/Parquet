@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -59,6 +59,7 @@ class RealSmallExecutionAdapter:
         self._assert_no_uncertain_execution()
         self.position_manager.assert_trading_enabled(now=current)
         await self._assert_agent_portfolio_identity()
+        await self._assert_current_broker_terms(attempt, current)
 
         submission_request_id = str(uuid4())
         submitting = attempt.model_copy(
@@ -81,6 +82,8 @@ class RealSmallExecutionAdapter:
                 stop_loss_rate=submitting.stop_loss,
                 take_profit_rate=submitting.take_profit,
                 request_id=submission_request_id,
+                settlement_type=submitting.settlement_type,
+                leverage=submitting.leverage,
             )
             broker_order_id = _extract_id(result.response, "orderId", "orderID", "order_id")
             lookup = await self._lookup_until_settled(reference_id=submission_request_id)
@@ -246,10 +249,17 @@ class RealSmallExecutionAdapter:
             raise RuntimeError("Real execution blocked: etoro.expected_gcid is not configured")
         if attempt.state != ExecutionAttemptState.PREPARED:
             raise RuntimeError(f"Execution attempt is not PREPARED: {attempt.state}")
+        if attempt.settlement_type is None or not attempt.settlement_type.strip():
+            raise RuntimeError("Real execution blocked: prepared ticket has no settlement_type")
         if attempt.amount_usd > config.supervised_real_max_amount_usd:
             raise RuntimeError(
                 f"Amount {attempt.amount_usd:.2f} exceeds supervised real cap "
                 f"{config.supervised_real_max_amount_usd:.2f}"
+            )
+        if attempt.leverage > config.supervised_real_max_leverage:
+            raise RuntimeError(
+                f"Leverage x{attempt.leverage} exceeds supervised cap "
+                f"x{config.supervised_real_max_leverage}"
             )
         expected = f"REAL {attempt.attempt_id}"
         if confirmation != expected:
@@ -278,6 +288,71 @@ class RealSmallExecutionAdapter:
                 + ", ".join(missing)
             )
         self._record_identity(identity)
+
+    async def _assert_current_broker_terms(
+        self,
+        attempt: ExecutionAttempt,
+        now: datetime,
+    ) -> None:
+        if attempt.settlement_type is None:
+            raise RuntimeError("Real execution blocked: settlement_type missing")
+        direction = "LONG" if attempt.side.strip().upper() == "BUY" else "SHORT"
+        try:
+            eligibility = await self.client.instrument_eligibility(
+                instrument_id=attempt.instrument_id
+            )
+            if not eligibility.allow_open_position:
+                raise RuntimeError("eToro no longer allows opening this instrument")
+            settlement = eligibility.settlement_type(
+                direction=direction,
+                leverage=attempt.leverage,
+            )
+            if settlement.lower() != attempt.settlement_type.lower():
+                raise RuntimeError(
+                    "eToro settlement type changed since ticket preparation: "
+                    f"{attempt.settlement_type} -> {settlement}"
+                )
+            minimum = eligibility.minimum_amount(
+                direction=direction,
+                leverage=attempt.leverage,
+            )
+            if minimum is not None and attempt.amount_usd + 1e-9 < minimum:
+                raise RuntimeError(
+                    f"Prepared amount {attempt.amount_usd:.2f} USD is below current "
+                    f"eToro minimum {minimum:.2f} USD"
+                )
+            if (
+                eligibility.min_position_exposure is not None
+                and attempt.exposure_usd + 1e-9 < eligibility.min_position_exposure
+            ):
+                raise RuntimeError(
+                    f"Prepared exposure {attempt.exposure_usd:.2f} USD is below current "
+                    f"eToro minimum exposure {eligibility.min_position_exposure:.2f} USD"
+                )
+            costs = await self.client.what_if_open_costs(
+                transaction=attempt.side,
+                instrument_id=attempt.instrument_id,
+                settlement_type=attempt.settlement_type,
+                amount_usd=attempt.amount_usd,
+                stop_loss_rate=attempt.stop_loss,
+                take_profit_rate=attempt.take_profit,
+                leverage=attempt.leverage,
+            )
+        except (EtoroExecutionError, EtoroExecutionTransportError) as exc:
+            raise RuntimeError(f"Real execution blocked: broker preflight failed: {exc}") from exc
+
+        age = now - costs.last_updated.astimezone(UTC)
+        if age < timedelta(seconds=-5) or age > timedelta(minutes=2):
+            raise RuntimeError(
+                f"Real execution blocked: what-if costs are stale or future-dated "
+                f"({age.total_seconds():.1f}s)"
+            )
+        if costs.total_usd < 0:
+            raise RuntimeError("Real execution blocked: negative what-if cost total")
+        if costs.total_usd >= attempt.amount_usd:
+            raise RuntimeError(
+                "Real execution blocked: USD what-if costs consume the full capital amount"
+            )
 
     def _record_identity(self, identity: EtoroIdentity) -> None:
         self.storage.set("etoro_authenticated_gcid", str(identity.gcid))
@@ -315,7 +390,6 @@ class RealSmallExecutionAdapter:
                 if not _is_transient_lookup_error(exc.status_code):
                     return None
             except EtoroExecutionTransportError:
-                # Read-only status queries are safe to retry; the write is never retried.
                 pass
             else:
                 if last.status_id not in _IN_FLIGHT_STATUS_IDS:
@@ -395,6 +469,7 @@ class RealSmallExecutionAdapter:
                     side=attempt.side,
                     opened_at=now,
                     amount_usd=attempt.amount_usd,
+                    leverage=float(attempt.leverage),
                     stop_loss_rate=attempt.stop_loss,
                     take_profit_rate=attempt.take_profit,
                 )
