@@ -5,20 +5,31 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from parquet import api as api_module
 from parquet import main as cli_main
 from parquet.enhanced_orchestrator import AutonomousOrchestrator as EnhancedAutonomousOrchestrator
 from parquet.models import MarketAnalysis
-from parquet.scheduler import ScheduledReview
+from parquet.resilient_strategy import (
+    ResilientStrategyDispatcher,
+    _is_usage_limit_error,
+    _schedule_usage_limit_retry,
+)
+from parquet.scheduler import ReviewQueue, ScheduledReview
 
 _NEXT_REVIEW_GRACE = timedelta(minutes=5)
 
 
 class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
-    """Runtime orchestrator with guarded, single-owner dynamic review scheduling."""
+    """Runtime orchestrator with guarded dynamic reviews and cross-process retries."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._restore_latest_chatgpt_review()
+        self._restore_strategy_usage_retry()
+
+    def ensure_structural_reviews(self, now: datetime | None = None) -> None:
+        _sync_persisted_reviews(self.storage.pending_reviews(), self.reviews)
+        super().ensure_structural_reviews(now)
 
     def add_review(self, review: ScheduledReview) -> None:
         if review.source == "chatgpt":
@@ -92,6 +103,43 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
                 ),
             )
 
+    def _restore_strategy_usage_retry(self) -> None:
+        """Recover a quota retry that a pre-resilience dispatcher already consumed."""
+        error = self.storage.get("strategy_last_error") or ""
+        if not _is_usage_limit_error(error):
+            return
+        existing = [
+            review
+            for review in self.storage.pending_reviews()
+            if review.source == "strategy_retry"
+        ]
+        if existing:
+            _sync_persisted_reviews(self.storage.pending_reviews(), self.reviews)
+            return
+
+        failed_at_raw = self.storage.get("strategy_last_error_at")
+        failed_at = datetime.now(UTC)
+        if failed_at_raw:
+            try:
+                failed_at = datetime.fromisoformat(
+                    failed_at_raw.replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except ValueError:
+                pass
+        retry = _schedule_usage_limit_retry(self.storage, failed_at)
+        self.storage.set("strategy_usage_limited", "1")
+        self.storage.set("strategy_usage_retry_at", retry.at.astimezone(UTC).isoformat())
+        self.storage.add_event(
+            "strategy_usage_retry_restored",
+            json.dumps(
+                {
+                    "failed_at": failed_at.isoformat(),
+                    "retry_at": retry.at.astimezone(UTC).isoformat(),
+                }
+            ),
+        )
+        _sync_persisted_reviews(self.storage.pending_reviews(), self.reviews)
+
     def process_analysis(self, analysis: MarketAnalysis) -> None:
         self.storage.save_analysis(
             analysis.analysis_id,
@@ -123,6 +171,25 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
             )
 
         self.storage.set("latest_analysis_id", analysis.analysis_id)
+
+
+def _sync_persisted_reviews(
+    persisted: list[ScheduledReview],
+    queue: ReviewQueue,
+) -> None:
+    persisted_by_key = {review.key: review for review in persisted}
+    in_memory = {review.key: review for review in queue.pending()}
+
+    # Strategy retry reviews can be cancelled by the dispatcher after a successful
+    # analysis, so mirror those deletions into the long-running orchestrator queue.
+    for key, review in in_memory.items():
+        if review.source == "strategy_retry" and key not in persisted_by_key:
+            queue.remove(review)
+
+    in_memory_keys = {review.key for review in queue.pending()}
+    for key, review in persisted_by_key.items():
+        if key not in in_memory_keys:
+            queue.add(review)
 
 
 def _load_stored_analysis(path: Path, analysis_id: str) -> MarketAnalysis | None:
@@ -167,9 +234,10 @@ def _actionable_next_review_at(value: datetime, now: datetime) -> datetime | Non
 
 
 def main() -> None:
-    # Keep the mature CLI implementation in parquet.main while replacing only the
-    # orchestrator class used by serve/once/manual-review commands.
+    # Keep the mature CLI/API implementations while replacing only the runtime
+    # orchestrator and the strategy dispatcher used by the API lifespan.
     cli_main.AutonomousOrchestrator = AutonomousOrchestrator  # type: ignore[attr-defined]
+    api_module.__dict__["StrategyDispatcher"] = ResilientStrategyDispatcher
     cli_main.main()
 
 
