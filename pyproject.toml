@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-parquet = "parquet.main:main"
+parquet = "parquet.runtime_entrypoint:main"
 parquet-live-test = "parquet.live_test:main"
 parquet-strategy-worker = "parquet.strategy_worker:main"
 
