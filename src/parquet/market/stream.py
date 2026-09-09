@@ -14,8 +14,6 @@ from uuid import uuid4
 
 import websockets
 
-from parquet.market.universe import EtoroUniverseClient
-
 
 @dataclass(frozen=True)
 class StreamTick:
@@ -70,11 +68,6 @@ class EtoroWebSocketScanner:
         self.frame_type_counts: dict[str, int] = defaultdict(int)
         self.frame_shape_counts: dict[str, int] = defaultdict(int)
         self.last_error: str | None = None
-        self._metadata_client = EtoroUniverseClient(
-            api_key=api_key,
-            user_key=user_key,
-            base_url=market_base_url,
-        )
 
     def set_universe(
         self,
@@ -118,22 +111,7 @@ class EtoroWebSocketScanner:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, 30.0)
 
-    async def _ensure_symbol_map(self) -> None:
-        missing = [value for value in self.instrument_ids if value not in self.symbol_by_id]
-        if not missing:
-            return
-        try:
-            metadata = await self._metadata_client.metadata(missing)
-        except Exception as exc:
-            self.last_error = f"eToro WebSocket metadata lookup failed: {exc!r}"
-            return
-        for instrument_id, item in metadata.items():
-            if item.symbol:
-                self.symbol_by_id[instrument_id] = item.symbol
-                self.id_by_symbol[item.symbol.upper()] = instrument_id
-
     async def _run_once(self) -> None:
-        await self._ensure_symbol_map()
         headers = {
             "x-api-key": self.api_key,
             "x-user-key": self.user_key,
@@ -166,27 +144,8 @@ class EtoroWebSocketScanner:
                     )
                 )
 
-            # Compatibility subscription retained while the live wire format is diagnosed.
-            symbols = [
-                self.symbol_by_id[instrument_id]
-                for instrument_id in self.instrument_ids
-                if instrument_id in self.symbol_by_id
-            ]
-            for start in range(0, len(symbols), 100):
-                symbol_batch = symbols[start : start + 100]
-                await socket.send(
-                    json.dumps(
-                        {
-                            "action": "subscribe",
-                            "channels": ["quotes"],
-                            "instruments": symbol_batch,
-                        }
-                    )
-                )
-
             self.connected = True
-            if self.last_error and "metadata lookup" not in self.last_error:
-                self.last_error = None
+            self.last_error = None
             active_ids = set(self.instrument_ids)
             async for raw in socket:
                 received_at = datetime.now(UTC)
@@ -277,6 +236,8 @@ def classify_stream_frame(raw: str | bytes) -> str:
     if not isinstance(payload, dict):
         return f"json_{type(payload).__name__}"
     normalized = _normalize_dict(payload)
+    if isinstance(normalized.get("messages"), list):
+        return "messages_batch"
     message_type = _first_scalar((normalized,), "type")
     if isinstance(message_type, str):
         return f"type:{message_type.lower()[:40]}"
@@ -304,17 +265,12 @@ def classify_stream_shape(raw: str | bytes) -> str:
 
 
 def parse_stream_error(raw: str | bytes) -> str | None:
-    """Return a redacted server-side error summary, if the frame clearly represents one."""
+    """Return a redacted server-side error summary, including messages batches."""
 
     payload = _json_value(raw)
     if payload is _INVALID_JSON:
         return None
-    candidates: list[dict[str, Any]] = []
-    if isinstance(payload, dict):
-        candidates.append(_normalize_dict(payload))
-    elif isinstance(payload, list):
-        candidates.extend(_normalize_dict(item) for item in payload if isinstance(item, dict))
-    for candidate in candidates:
+    for candidate in _frame_candidates(payload):
         result = _parse_stream_error_payload(candidate)
         if result is not None:
             return result
@@ -354,20 +310,14 @@ def parse_stream_ticks(
     raw: str | bytes,
     symbol_to_instrument_id: dict[str, int] | None = None,
 ) -> list[StreamTick]:
-    """Parse one tick or a JSON batch of ticks from a WebSocket frame."""
+    """Parse ticks from single, list, or {messages:[...]} WebSocket frames."""
 
     payload = _json_value(raw)
     if payload is _INVALID_JSON:
         return []
-    if isinstance(payload, dict):
-        candidates = [_normalize_dict(payload)]
-    elif isinstance(payload, list):
-        candidates = [_normalize_dict(item) for item in payload if isinstance(item, dict)]
-    else:
-        return []
 
     ticks: list[StreamTick] = []
-    for candidate in candidates:
+    for candidate in _frame_candidates(payload):
         tick = _parse_stream_tick_payload(candidate, symbol_to_instrument_id)
         if tick is not None:
             ticks.append(tick)
@@ -384,13 +334,43 @@ def parse_stream_tick(
     return None if not ticks else ticks[0]
 
 
+def _frame_candidates(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    """Flatten only known WebSocket batch containers, with a small recursion bound."""
+
+    if depth > 4:
+        return []
+    if isinstance(value, dict):
+        normalized = _normalize_dict(value)
+        result = [normalized]
+        messages = normalized.get("messages")
+        if isinstance(messages, (list, dict)):
+            result.extend(_frame_candidates(messages, depth=depth + 1))
+        elif isinstance(messages, str):
+            decoded = _json_value(messages)
+            if decoded is not _INVALID_JSON:
+                result.extend(_frame_candidates(decoded, depth=depth + 1))
+        return result
+    if isinstance(value, list):
+        list_result: list[dict[str, Any]] = []
+        for item in value:
+            list_result.extend(_frame_candidates(item, depth=depth + 1))
+        return list_result
+    if isinstance(value, str):
+        decoded = _json_value(value)
+        if decoded is not _INVALID_JSON:
+            return _frame_candidates(decoded, depth=depth + 1)
+    return []
+
+
 def _parse_stream_tick_payload(
     payload: dict[str, Any],
     symbol_to_instrument_id: dict[str, int] | None,
 ) -> StreamTick | None:
     data = _nested_dict(payload.get("data"))
+    message = _nested_dict(payload.get("message"))
+    nested_payload = _nested_dict(payload.get("payload"))
     content = _content_dict(payload, data)
-    sources = (content, data, payload)
+    sources = (content, data, message, nested_payload, payload)
 
     topic = _first_scalar(sources, "topic", "Topic")
     instrument_id = _first_int(
@@ -453,6 +433,7 @@ def _parse_stream_tick_payload(
 
 _INVALID_JSON = object()
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
+_DOTNET_DATE_RE = re.compile(r"^/Date\(([-+]?\d+)(?:[-+]\d{4})?\)/$")
 
 
 def _json_value(raw: str | bytes) -> Any:
@@ -460,13 +441,6 @@ def _json_value(raw: str | bytes) -> Any:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
         return _INVALID_JSON
-
-
-def _json_dict(raw: str | bytes) -> dict[str, Any] | None:
-    payload = _json_value(raw)
-    if not isinstance(payload, dict):
-        return None
-    return _normalize_dict(payload)
 
 
 def _normalize_dict(value: dict[Any, Any]) -> dict[str, Any]:
@@ -494,19 +468,21 @@ def _shape_for_value(value: Any) -> str:
     if isinstance(value, dict):
         normalized = _normalize_dict(value)
         parts = [f"dict[{_safe_key_signature(normalized)}]"]
-        for key in ("data", "content", "payload", "message"):
+        for key in ("messages", "data", "content", "payload", "message"):
             nested = normalized.get(key)
             if isinstance(nested, dict):
                 parts.append(f"{key}[{_safe_key_signature(_normalize_dict(nested))}]")
+            elif isinstance(nested, list):
+                parts.append(f"{key}:list[len={len(nested)};{_list_item_shape(nested)}]")
             elif isinstance(nested, str):
                 decoded = _json_value(nested)
                 if isinstance(decoded, dict):
                     parts.append(f"{key}:json[{_safe_key_signature(_normalize_dict(decoded))}]")
                 elif isinstance(decoded, list):
                     parts.append(f"{key}:json_list[{_list_item_shape(decoded)}]")
-        return "/".join(parts)[:360]
+        return "/".join(parts)[:480]
     if isinstance(value, list):
-        return f"list[len={len(value)};{_list_item_shape(value)}]"[:360]
+        return f"list[len={len(value)};{_list_item_shape(value)}]"[:480]
     if value is None:
         return "json:null"
     return f"json:{type(value).__name__}"
@@ -592,16 +568,30 @@ def _downsample(points: list[StreamTick], max_points: int) -> list[StreamTick]:
 
 def _timestamp(value: Any) -> datetime:
     if isinstance(value, (int, float)):
-        seconds = float(value)
-        if seconds > 10_000_000_000:
-            seconds /= 1000.0
-        try:
-            return datetime.fromtimestamp(seconds, tz=UTC)
-        except (OverflowError, OSError, ValueError):
-            pass
+        return _timestamp_from_number(float(value))
     if isinstance(value, str):
+        match = _DOTNET_DATE_RE.match(value)
+        if match is not None:
+            try:
+                return _timestamp_from_number(float(match.group(1)))
+            except ValueError:
+                pass
+        try:
+            numeric = float(value)
+        except ValueError:
+            numeric = None
+        if numeric is not None:
+            return _timestamp_from_number(numeric)
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
         except ValueError:
             pass
     return datetime.now(UTC)
+
+
+def _timestamp_from_number(value: float) -> datetime:
+    seconds = value / 1000.0 if abs(value) > 10_000_000_000 else value
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return datetime.now(UTC)
