@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from parquet import main as cli_main
 from parquet.enhanced_orchestrator import AutonomousOrchestrator as EnhancedAutonomousOrchestrator
@@ -12,56 +14,80 @@ _NEXT_REVIEW_GRACE = timedelta(minutes=5)
 
 
 class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
-    """Runtime orchestrator with stale-analysis catch-up protection."""
+    """Runtime orchestrator with guarded, single-owner dynamic review scheduling."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
-        self._coalesce_chatgpt_reviews()
+        self._restore_latest_chatgpt_review()
 
     def add_review(self, review: ScheduledReview) -> None:
         if review.source == "chatgpt":
-            duplicate = next(
-                (
-                    existing
-                    for existing in self.reviews.pending()
-                    if _same_chatgpt_review_slot(existing, review)
-                ),
-                None,
-            )
-            if duplicate is not None:
-                self.storage.add_event(
-                    "duplicate_next_review_suppressed",
-                    json.dumps(
-                        {
-                            "kept_at": duplicate.at.astimezone(UTC).isoformat(),
-                            "kept_reason": duplicate.reason,
-                            "suppressed_at": review.at.astimezone(UTC).isoformat(),
-                            "suppressed_reason": review.reason,
-                        }
-                    ),
-                )
-                return
+            self._replace_chatgpt_review(review)
+            return
         super().add_review(review)
 
-    def _coalesce_chatgpt_reviews(self) -> None:
-        kept: dict[str, ScheduledReview] = {}
-        for review in list(self.reviews.pending()):
-            if review.source != "chatgpt":
+    def _replace_chatgpt_review(
+        self,
+        review: ScheduledReview | None,
+        *,
+        analysis_id: str | None = None,
+    ) -> None:
+        """Keep at most one dynamic ChatGPT review; the newest analysis owns it."""
+        kept_existing = False
+        for existing in list(self.reviews.pending()):
+            if existing.source != "chatgpt":
                 continue
-            slot = _chatgpt_review_slot(review)
-            existing = kept.get(slot)
-            if existing is None:
-                kept[slot] = review
+            if review is not None and not kept_existing and existing.key == review.key:
+                kept_existing = True
                 continue
-            self.reviews.remove(review)
-            self.storage.delete_review(review)
+            self.reviews.remove(existing)
+            self.storage.delete_review(existing)
             self.storage.add_event(
-                "duplicate_next_review_removed",
+                "superseded_next_review_removed",
                 json.dumps(
                     {
-                        "slot": slot,
-                        "kept_reason": existing.reason,
-                        "removed_reason": review.reason,
+                        "analysis_id": analysis_id,
+                        "removed_at": existing.at.astimezone(UTC).isoformat(),
+                        "removed_reason": existing.reason,
+                        "replacement_at": (
+                            None if review is None else review.at.astimezone(UTC).isoformat()
+                        ),
+                        "replacement_reason": None if review is None else review.reason,
+                    }
+                ),
+            )
+
+        if review is not None and not kept_existing:
+            super().add_review(review)
+
+    def _restore_latest_chatgpt_review(self) -> None:
+        """Repair persisted dynamic schedules from the latest stored analysis on startup."""
+        analysis_id = self.storage.get("latest_analysis_id")
+        if not analysis_id:
+            return
+        analysis = _load_stored_analysis(self.storage.path, analysis_id)
+        if analysis is None:
+            self.storage.add_event(
+                "latest_analysis_restore_error",
+                json.dumps({"analysis_id": analysis_id, "error": "analysis payload not found"}),
+            )
+            return
+
+        current = datetime.now(UTC)
+        review = _scheduled_chatgpt_review(analysis, current)
+        self._replace_chatgpt_review(review, analysis_id=analysis.analysis_id)
+        if analysis.next_review is not None and review is None:
+            requested_at = analysis.next_review.at.astimezone(UTC)
+            self.storage.add_event(
+                "stale_next_review_skipped",
+                json.dumps(
+                    {
+                        "analysis_id": analysis.analysis_id,
+                        "requested_at": requested_at.isoformat(),
+                        "processed_at": current.isoformat(),
+                        "age_seconds": round((current - requested_at).total_seconds(), 3),
+                        "reason": analysis.next_review.reason,
+                        "source": "startup_restore",
                     }
                 ),
             )
@@ -77,44 +103,58 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
         for watch in analysis.watch:
             self.storage.save_watch(analysis.analysis_id, watch)
 
-        if analysis.next_review is not None:
-            current = datetime.now(UTC)
-            review_at = _actionable_next_review_at(analysis.next_review.at, current)
-            if review_at is None:
-                requested_at = analysis.next_review.at.astimezone(UTC)
-                self.storage.add_event(
-                    "stale_next_review_skipped",
-                    json.dumps(
-                        {
-                            "analysis_id": analysis.analysis_id,
-                            "requested_at": requested_at.isoformat(),
-                            "processed_at": current.isoformat(),
-                            "age_seconds": round((current - requested_at).total_seconds(), 3),
-                            "reason": analysis.next_review.reason,
-                        }
-                    ),
-                )
-            else:
-                self.add_review(
-                    ScheduledReview(
-                        at=review_at,
-                        reason=analysis.next_review.reason,
-                        source="chatgpt",
-                    )
-                )
+        current = datetime.now(UTC)
+        review = _scheduled_chatgpt_review(analysis, current)
+        self._replace_chatgpt_review(review, analysis_id=analysis.analysis_id)
+        if analysis.next_review is not None and review is None:
+            requested_at = analysis.next_review.at.astimezone(UTC)
+            self.storage.add_event(
+                "stale_next_review_skipped",
+                json.dumps(
+                    {
+                        "analysis_id": analysis.analysis_id,
+                        "requested_at": requested_at.isoformat(),
+                        "processed_at": current.isoformat(),
+                        "age_seconds": round((current - requested_at).total_seconds(), 3),
+                        "reason": analysis.next_review.reason,
+                        "source": "analysis_ingest",
+                    }
+                ),
+            )
 
         self.storage.set("latest_analysis_id", analysis.analysis_id)
 
 
-def _chatgpt_review_slot(review: ScheduledReview) -> str:
-    return review.at.astimezone(UTC).replace(second=0, microsecond=0).isoformat()
+def _load_stored_analysis(path: Path, analysis_id: str) -> MarketAnalysis | None:
+    try:
+        with sqlite3.connect(path) as conn:
+            row = conn.execute(
+                "SELECT payload FROM analyses WHERE analysis_id = ?",
+                (analysis_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        return MarketAnalysis.model_validate_json(str(row[0]))
+    except Exception:
+        return None
 
 
-def _same_chatgpt_review_slot(left: ScheduledReview, right: ScheduledReview) -> bool:
-    return (
-        left.source == "chatgpt"
-        and right.source == "chatgpt"
-        and _chatgpt_review_slot(left) == _chatgpt_review_slot(right)
+def _scheduled_chatgpt_review(
+    analysis: MarketAnalysis,
+    now: datetime,
+) -> ScheduledReview | None:
+    if analysis.next_review is None:
+        return None
+    review_at = _actionable_next_review_at(analysis.next_review.at, now)
+    if review_at is None:
+        return None
+    return ScheduledReview(
+        at=review_at,
+        reason=analysis.next_review.reason,
+        source="chatgpt",
     )
 
 
