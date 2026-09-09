@@ -9,8 +9,8 @@ from pathlib import Path
 import uvicorn
 
 from parquet.api import create_app
-from parquet.autonomous_orchestrator import AutonomousOrchestrator
 from parquet.config import Settings, load_settings
+from parquet.enhanced_orchestrator import AutonomousOrchestrator
 from parquet.execution.etoro import EtoroExecutionClient
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.reconciliation import ReconciliationService, run_with_reconciliation
