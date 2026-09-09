@@ -1,11 +1,13 @@
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from parquet.models import MarketAnalysis, NextReview
 from parquet.runtime_entrypoint import (
     _actionable_next_review_at,
-    _chatgpt_review_slot,
-    _same_chatgpt_review_slot,
+    _load_stored_analysis,
+    _scheduled_chatgpt_review,
 )
-from parquet.scheduler import ScheduledReview
+from parquet.storage import Storage
 
 
 def test_future_next_review_is_preserved() -> None:
@@ -29,25 +31,44 @@ def test_stale_next_review_is_skipped() -> None:
     assert _actionable_next_review_at(review_at, now) is None
 
 
-def test_chatgpt_review_slot_is_minute_scoped() -> None:
-    first = ScheduledReview(
-        at=datetime(2026, 9, 9, 13, 35, 1, tzinfo=UTC),
-        reason="first reassessment",
-        source="chatgpt",
+def test_analysis_next_review_becomes_chatgpt_schedule() -> None:
+    now = datetime(2026, 9, 9, 13, 16, tzinfo=UTC)
+    analysis = MarketAnalysis(
+        analysis_id="latest-analysis",
+        generated_at=now,
+        next_review=NextReview(
+            at=datetime(2026, 9, 9, 13, 45, tzinfo=UTC),
+            reason="Reassess after the open",
+        ),
     )
-    second = ScheduledReview(
-        at=datetime(2026, 9, 9, 13, 35, 59, tzinfo=UTC),
-        reason="second reassessment",
-        source="chatgpt",
+
+    review = _scheduled_chatgpt_review(analysis, now)
+
+    assert review is not None
+    assert review.at == datetime(2026, 9, 9, 13, 45, tzinfo=UTC)
+    assert review.reason == "Reassess after the open"
+    assert review.source == "chatgpt"
+
+
+def test_latest_analysis_can_be_restored_from_storage(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    analysis = MarketAnalysis(
+        analysis_id="latest-analysis",
+        generated_at=datetime(2026, 9, 9, 13, 5, tzinfo=UTC),
+        next_review=NextReview(
+            at=datetime(2026, 9, 9, 13, 45, tzinfo=UTC),
+            reason="Latest analysis owns this review",
+        ),
+    )
+    storage.save_analysis(
+        analysis.analysis_id,
+        analysis.generated_at.isoformat(),
+        analysis.model_dump_json(),
     )
 
-    assert _chatgpt_review_slot(first) == "2026-09-09T13:35:00+00:00"
-    assert _same_chatgpt_review_slot(first, second)
+    restored = _load_stored_analysis(storage.path, analysis.analysis_id)
 
-
-def test_non_chatgpt_reviews_are_not_deduplicated() -> None:
-    at = datetime(2026, 9, 9, 13, 35, tzinfo=UTC)
-    chatgpt = ScheduledReview(at=at, reason="analysis", source="chatgpt")
-    structural = ScheduledReview(at=at, reason="market_open:test", source="structural")
-
-    assert not _same_chatgpt_review_slot(chatgpt, structural)
+    assert restored is not None
+    assert restored.analysis_id == analysis.analysis_id
+    assert restored.next_review is not None
+    assert restored.next_review.at == analysis.next_review.at
