@@ -31,7 +31,7 @@ dev = [
 [project.scripts]
 parquet = "parquet.runtime_entrypoint:main"
 parquet-live-test = "parquet.live_test:main"
-parquet-strategy-worker = "parquet.strategy_worker:main"
+parquet-strategy-worker = "parquet.strategy_policy:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/parquet"]
@@ -48,6 +48,7 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/parquet/strategy.py" = ["E501"]
+"src/parquet/strategy_policy.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
