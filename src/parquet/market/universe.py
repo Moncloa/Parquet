@@ -76,23 +76,44 @@ class EtoroUniverseClient:
                 "/market-data/instruments",
                 params={"instrumentIds": ",".join(str(value) for value in batch)},
             )
-            for item in _items(body, "instruments"):
-                raw_id = _first(item, "instrumentId", "instrumentID", "InstrumentID")
+            # Official eToro response key is `instrumentDisplayDatas` and its
+            # field names differ from the search/rates endpoints.
+            for item in _items(body, "instrumentDisplayDatas"):
+                raw_id = _first(item, "instrumentID", "instrumentId", "InstrumentID")
                 if raw_id is None:
                     continue
                 instrument_id = int(raw_id)
                 result[instrument_id] = UniverseInstrument(
                     instrument_id=instrument_id,
                     symbol=_optional_str(
-                        _first(item, "internalSymbolFull", "symbol", "Symbol")
+                        _first(
+                            item,
+                            "symbolFull",
+                            "internalSymbolFull",
+                            "symbol",
+                            "Symbol",
+                        )
                     ),
                     name=_optional_str(
-                        _first(item, "displayname", "displayName", "name", "instrumentName")
+                        _first(
+                            item,
+                            "instrumentDisplayName",
+                            "displayname",
+                            "displayName",
+                            "name",
+                            "instrumentName",
+                        )
                     ),
                     instrument_type_id=_optional_int(
-                        _first(item, "instrumentTypeId", "instrumentTypeID")
+                        _first(
+                            item,
+                            "instrumentTypeID",
+                            "instrumentTypeId",
+                        )
                     ),
-                    exchange_id=_optional_int(_first(item, "exchangeId", "exchangeID")),
+                    exchange_id=_optional_int(
+                        _first(item, "exchangeID", "exchangeId")
+                    ),
                 )
         return result
 
