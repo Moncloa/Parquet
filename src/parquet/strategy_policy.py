@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from parquet.models import ReviewRequest
 from parquet import strategy_worker
+from parquet.models import ReviewRequest
 
 
 def opportunity_strategy_prompt(request: ReviewRequest) -> str:
