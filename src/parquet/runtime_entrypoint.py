@@ -65,7 +65,7 @@ def _actionable_next_review_at(value: datetime, now: datetime) -> datetime | Non
 def main() -> None:
     # Keep the mature CLI implementation in parquet.main while replacing only the
     # orchestrator class used by serve/once/manual-review commands.
-    cli_main.AutonomousOrchestrator = AutonomousOrchestrator
+    setattr(cli_main, "AutonomousOrchestrator", AutonomousOrchestrator)
     cli_main.main()
 
 
