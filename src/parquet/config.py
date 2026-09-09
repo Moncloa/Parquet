@@ -57,7 +57,7 @@ class EtoroConfig(BaseModel):
     websocket_universe_size: int = Field(default=500, ge=20, le=5000)
     websocket_shortlist_size: int = Field(default=20, ge=5, le=100)
     websocket_rotation_minutes: int = Field(default=15, ge=5, le=240)
-    websocket_points_per_instrument: int = Field(default=240, ge=20, le=2000)
+    websocket_points_per_instrument: int = Field(default=1000, ge=20, le=5000)
 
 
 class StrategyConfig(BaseModel):
