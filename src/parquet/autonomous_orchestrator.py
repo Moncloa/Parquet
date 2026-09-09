@@ -44,8 +44,13 @@ class AutonomousOrchestrator(Orchestrator):
             limit=self.settings.etoro.websocket_shortlist_size,
             max_spread_bps=self.settings.risk.max_spread_bps,
         )
-        self.storage.set("websocket_shortlist_raw", json.dumps(candidates))
-        self.storage.set("websocket_shortlist_at", current.astimezone(UTC).isoformat())
+        # Do not destroy the last good cross-process shortlist while a freshly
+        # restarted/rotated scanner is still warming up to the quality threshold.
+        # The stored timestamp remains unchanged and the normal freshness guard will
+        # naturally expire it if no new good shortlist appears.
+        if candidates:
+            self.storage.set("websocket_shortlist_raw", json.dumps(candidates))
+            self.storage.set("websocket_shortlist_at", current.astimezone(UTC).isoformat())
         self.storage.set("websocket_streamed_instruments", str(len(scanner.series)))
         self.storage.set("websocket_incoming_message_count", str(scanner.incoming_message_count))
         self.storage.set("websocket_parsed_tick_count", str(scanner.parsed_tick_count))
@@ -56,6 +61,7 @@ class AutonomousOrchestrator(Orchestrator):
 
     async def _stream_context(self, current: datetime) -> tuple[dict[str, object], list[str]]:
         scanner = self.stream_scanner
+        live_warming_up = False
         if scanner is not None and scanner.connected and scanner.series:
             candidate_pool = scanner.shortlist(
                 limit=min(100, max(self.settings.etoro.websocket_shortlist_size * 5, 20)),
@@ -66,53 +72,75 @@ class AutonomousOrchestrator(Orchestrator):
                 limit=self.settings.etoro.websocket_shortlist_size,
                 max_spread_bps=self.settings.risk.max_spread_bps,
             )
-            enriched, symbols = await self._enrich_stream_candidates(candidates, source="live")
-            return (
-                {
-                    "enabled": True,
-                    "source": "live_service_scanner",
-                    "connected": True,
-                    "url": self.settings.etoro.websocket_url,
-                    "subscribed_instruments": len(scanner.instrument_ids),
-                    "streamed_instruments": len(scanner.series),
-                    "last_message_at": (
-                        None if scanner.last_message_at is None else scanner.last_message_at.isoformat()
-                    ),
-                    "last_tick_at": (
-                        None if scanner.last_tick_at is None else scanner.last_tick_at.isoformat()
-                    ),
-                    "last_error": scanner.last_error,
-                    "ranking": "abs_stream_change_plus_step_volatility",
-                    "filters": {
-                        "min_samples": _WIDE_MIN_SAMPLES,
-                        "min_span_seconds": _WIDE_MIN_SPAN_SECONDS,
-                        "max_known_spread_bps": self.settings.risk.max_spread_bps,
+            if candidates:
+                enriched, symbols = await self._enrich_stream_candidates(candidates, source="live")
+                return (
+                    {
+                        "enabled": True,
+                        "source": "live_service_scanner",
+                        "connected": True,
+                        "url": self.settings.etoro.websocket_url,
+                        "subscribed_instruments": len(scanner.instrument_ids),
+                        "streamed_instruments": len(scanner.series),
+                        "last_message_at": (
+                            None if scanner.last_message_at is None else scanner.last_message_at.isoformat()
+                        ),
+                        "last_tick_at": (
+                            None if scanner.last_tick_at is None else scanner.last_tick_at.isoformat()
+                        ),
+                        "last_error": scanner.last_error,
+                        "ranking": "abs_stream_change_plus_step_volatility",
+                        "filters": {
+                            "min_samples": _WIDE_MIN_SAMPLES,
+                            "min_span_seconds": _WIDE_MIN_SPAN_SECONDS,
+                            "max_known_spread_bps": self.settings.risk.max_spread_bps,
+                        },
+                        "candidates": enriched,
                     },
-                    "candidates": enriched,
-                },
-                symbols,
-            )
+                    symbols,
+                )
+            live_warming_up = True
 
         candidates = self._stored_stream_candidates(current)
         enriched, symbols = await self._enrich_stream_candidates(
             candidates,
             source="persisted_service_shortlist",
         )
+        stored_connected = self.storage.get("websocket_connected") == "1"
+        source = "persisted_service_shortlist" if candidates else (
+            "scanner_warming_up" if live_warming_up or stored_connected else "no_fresh_shortlist"
+        )
         return (
             {
                 "enabled": True,
-                "source": "persisted_service_shortlist" if candidates else "no_fresh_shortlist",
-                "connected": self.storage.get("websocket_connected") == "1",
+                "source": source,
+                "connected": True if live_warming_up else stored_connected,
                 "url": self.settings.etoro.websocket_url,
-                "subscribed_instruments": _optional_int(
-                    self.storage.get("websocket_universe_subscribed_count")
+                "subscribed_instruments": (
+                    len(scanner.instrument_ids)
+                    if live_warming_up and scanner is not None
+                    else _optional_int(self.storage.get("websocket_universe_subscribed_count"))
                 ),
-                "streamed_instruments": _optional_int(
-                    self.storage.get("websocket_streamed_instruments")
+                "streamed_instruments": (
+                    len(scanner.series)
+                    if live_warming_up and scanner is not None
+                    else _optional_int(self.storage.get("websocket_streamed_instruments"))
                 ),
-                "last_message_at": self.storage.get("websocket_last_message_at") or None,
-                "last_tick_at": self.storage.get("websocket_last_tick_at") or None,
-                "last_error": self.storage.get("websocket_last_error") or None,
+                "last_message_at": (
+                    scanner.last_message_at.isoformat()
+                    if live_warming_up and scanner is not None and scanner.last_message_at is not None
+                    else self.storage.get("websocket_last_message_at") or None
+                ),
+                "last_tick_at": (
+                    scanner.last_tick_at.isoformat()
+                    if live_warming_up and scanner is not None and scanner.last_tick_at is not None
+                    else self.storage.get("websocket_last_tick_at") or None
+                ),
+                "last_error": (
+                    scanner.last_error
+                    if live_warming_up and scanner is not None
+                    else self.storage.get("websocket_last_error") or None
+                ),
                 "shortlist_at": self.storage.get("websocket_shortlist_at") or None,
                 "ranking": "abs_stream_change_plus_step_volatility",
                 "filters": {
