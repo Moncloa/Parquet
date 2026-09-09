@@ -74,8 +74,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         )
         strategy = _strategy_state(settings, orchestrator)
         websocket = _websocket_state(orchestrator)
+        strategy_available = not settings.strategy.enabled or bool(strategy["worker_ready"])
         return {
-            "status": "ok",
+            "status": "ok" if strategy_available else "degraded",
             "mode": settings.mode,
             "github": settings.github.enabled,
             "etoro": settings.etoro.enabled,
@@ -98,8 +99,12 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "websocket_last_error": websocket["last_error"],
             "strategy_enabled": settings.strategy.enabled,
             "strategy_provider": settings.strategy.provider,
+            "strategy_available": strategy_available,
+            "strategy_worker_alive": strategy["worker_alive"],
             "strategy_worker_ready": strategy["worker_ready"],
             "strategy_worker_heartbeat_at": strategy["heartbeat_at"],
+            "strategy_usage_limited": strategy["usage_limited"],
+            "strategy_retry_at": strategy["retry_at"],
             "strategy_pending_requests": strategy["pending_requests"],
             "strategy_last_analysis_id": orchestrator.storage.get("strategy_last_analysis_id"),
             "strategy_last_error": orchestrator.storage.get("strategy_last_error") or None,
@@ -144,6 +149,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         )
         strategy = _strategy_state(settings, orchestrator)
         websocket = _websocket_state(orchestrator)
+        strategy_available = not settings.strategy.enabled or bool(strategy["worker_ready"])
         return {
             "mode": settings.mode,
             "latest_analysis_id": orchestrator.storage.get("latest_analysis_id"),
@@ -207,9 +213,13 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             ),
             "strategy_enabled": settings.strategy.enabled,
             "strategy_provider": settings.strategy.provider,
+            "strategy_available": strategy_available,
+            "strategy_worker_alive": strategy["worker_alive"],
             "strategy_worker_ready": strategy["worker_ready"],
             "strategy_worker_heartbeat_at": strategy["heartbeat_at"],
             "strategy_codex_authenticated": strategy["codex_authenticated"],
+            "strategy_usage_limited": strategy["usage_limited"],
+            "strategy_retry_at": strategy["retry_at"],
             "strategy_pending_requests": strategy["pending_requests"],
             "strategy_last_analysis_id": orchestrator.storage.get("strategy_last_analysis_id"),
             "strategy_last_success_at": orchestrator.storage.get("strategy_last_success_at"),
@@ -278,9 +288,12 @@ def _websocket_state(orchestrator: Orchestrator) -> dict[str, object]:
 def _strategy_state(settings: Settings, orchestrator: Orchestrator) -> dict[str, object]:
     if not settings.strategy.enabled:
         return {
+            "worker_alive": False,
             "worker_ready": False,
             "heartbeat_at": None,
             "codex_authenticated": False,
+            "usage_limited": False,
+            "retry_at": None,
             "pending_requests": 0,
         }
     queue = StrategyQueue(settings.strategy.queue_dir)
@@ -289,15 +302,21 @@ def _strategy_state(settings: Settings, orchestrator: Orchestrator) -> dict[str,
     codex_authenticated = bool(
         worker is not None and worker.get("codex_authenticated") is True
     )
-    worker_ready = codex_authenticated and _heartbeat_fresh(heartbeat_at)
+    worker_alive = codex_authenticated and _heartbeat_fresh(heartbeat_at)
+    usage_limited = orchestrator.storage.get("strategy_usage_limited") == "1"
+    retry_at = orchestrator.storage.get("strategy_usage_retry_at") or None
+    worker_ready = worker_alive and not usage_limited
     try:
         pending = queue.pending_count()
     except OSError:
         pending = 0
     return {
+        "worker_alive": worker_alive,
         "worker_ready": worker_ready,
         "heartbeat_at": heartbeat_at,
         "codex_authenticated": codex_authenticated,
+        "usage_limited": usage_limited,
+        "retry_at": retry_at,
         "pending_requests": pending,
     }
 
