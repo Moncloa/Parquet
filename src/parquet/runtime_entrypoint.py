@@ -9,7 +9,11 @@ from parquet import api as api_module
 from parquet import main as cli_main
 from parquet.enhanced_orchestrator import AutonomousOrchestrator as EnhancedAutonomousOrchestrator
 from parquet.models import MarketAnalysis
-from parquet.resilient_strategy import ResilientStrategyDispatcher
+from parquet.resilient_strategy import (
+    ResilientStrategyDispatcher,
+    _is_usage_limit_error,
+    _schedule_usage_limit_retry,
+)
 from parquet.scheduler import ReviewQueue, ScheduledReview
 
 _NEXT_REVIEW_GRACE = timedelta(minutes=5)
@@ -21,6 +25,7 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._restore_latest_chatgpt_review()
+        self._restore_strategy_usage_retry()
 
     def ensure_structural_reviews(self, now: datetime | None = None) -> None:
         _sync_persisted_reviews(self.storage.pending_reviews(), self.reviews)
@@ -97,6 +102,43 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
                     }
                 ),
             )
+
+    def _restore_strategy_usage_retry(self) -> None:
+        """Recover a quota retry that a pre-resilience dispatcher already consumed."""
+        error = self.storage.get("strategy_last_error") or ""
+        if not _is_usage_limit_error(error):
+            return
+        existing = [
+            review
+            for review in self.storage.pending_reviews()
+            if review.source == "strategy_retry"
+        ]
+        if existing:
+            _sync_persisted_reviews(self.storage.pending_reviews(), self.reviews)
+            return
+
+        failed_at_raw = self.storage.get("strategy_last_error_at")
+        failed_at = datetime.now(UTC)
+        if failed_at_raw:
+            try:
+                failed_at = datetime.fromisoformat(
+                    failed_at_raw.replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except ValueError:
+                pass
+        retry = _schedule_usage_limit_retry(self.storage, failed_at)
+        self.storage.set("strategy_usage_limited", "1")
+        self.storage.set("strategy_usage_retry_at", retry.at.astimezone(UTC).isoformat())
+        self.storage.add_event(
+            "strategy_usage_retry_restored",
+            json.dumps(
+                {
+                    "failed_at": failed_at.isoformat(),
+                    "retry_at": retry.at.astimezone(UTC).isoformat(),
+                }
+            ),
+        )
+        _sync_persisted_reviews(self.storage.pending_reviews(), self.reviews)
 
     def process_analysis(self, analysis: MarketAnalysis) -> None:
         self.storage.save_analysis(
