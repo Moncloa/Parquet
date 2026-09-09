@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from parquet.models import ReviewRequest
-from parquet.strategy_worker import StdinCodexStrategyWorker, _compact_strategy_request
 from parquet.strategy import CodexWorkerSettings
+from parquet.strategy_worker import StdinCodexStrategyWorker, _compact_strategy_request
 
 
 def _wide_request(*, point_count: int = 2000) -> ReviewRequest:
