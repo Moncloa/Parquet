@@ -16,11 +16,12 @@ class FakeStorage:
 
 
 class FakeOrchestrator:
-    def __init__(self) -> None:
+    def __init__(self, *, posted_count: int = 1) -> None:
         self.bridge = object()
         self.storage = FakeStorage()
         self.market_client = object()
         self.reviews = []
+        self.posted_count = posted_count
 
     def add_review(self, review) -> None:
         self.reviews.append(review)
@@ -29,7 +30,7 @@ class FakeOrchestrator:
         assert len(self.reviews) == 1
         assert self.reviews[0].source == "manual"
         assert self.reviews[0].reason == "manual_opportunity_scan"
-        return 1
+        return self.posted_count
 
 
 class FakeReconciliation:
@@ -42,22 +43,42 @@ class FakeReconciliation:
         return 1
 
 
-def test_request_review_now_posts_one_safe_review(monkeypatch, capsys) -> None:
-    settings = SimpleNamespace(
+def _settings():
+    return SimpleNamespace(
         github=SimpleNamespace(
             repository="Moncloa/Parquet",
             runtime_pr=2,
         )
     )
-    orchestrator = FakeOrchestrator()
 
-    monkeypatch.setattr("parquet.main.load_settings", lambda path: settings)
+
+def _install_fakes(monkeypatch, orchestrator: FakeOrchestrator) -> None:
+    monkeypatch.setattr("parquet.main.load_settings", lambda path: _settings())
     monkeypatch.setattr("parquet.main.AutonomousOrchestrator", lambda settings: orchestrator)
     monkeypatch.setattr("parquet.main.ReconciliationService", FakeReconciliation)
+
+
+def test_request_review_now_posts_one_safe_review(monkeypatch, capsys) -> None:
+    orchestrator = FakeOrchestrator()
+    _install_fakes(monkeypatch, orchestrator)
 
     result = run_request_review_now(None, "manual_opportunity_scan")
 
     assert result == 0
     out = capsys.readouterr().out
     assert "Manual review request posted" in out
+    assert "additional_due_reviews_posted" not in out
+    assert "No broker order was sent." in out
+
+
+def test_request_review_now_allows_other_due_reviews(monkeypatch, capsys) -> None:
+    orchestrator = FakeOrchestrator(posted_count=3)
+    _install_fakes(monkeypatch, orchestrator)
+
+    result = run_request_review_now(None, "manual_opportunity_scan")
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert "Manual review request posted" in out
+    assert "additional_due_reviews_posted: 2" in out
     assert "No broker order was sent." in out
