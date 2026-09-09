@@ -7,8 +7,8 @@ from pathlib import Path
 
 from parquet import api as api_module
 from parquet import main as cli_main
-from parquet.enhanced_orchestrator import AutonomousOrchestrator as EnhancedAutonomousOrchestrator
 from parquet.models import MarketAnalysis
+from parquet.proposal_orchestrator import AutonomousOrchestrator as ProposalAutonomousOrchestrator
 from parquet.resilient_strategy import (
     ResilientStrategyDispatcher,
     _is_usage_limit_error,
@@ -19,7 +19,7 @@ from parquet.scheduler import ReviewQueue, ScheduledReview
 _NEXT_REVIEW_GRACE = timedelta(minutes=5)
 
 
-class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
+class AutonomousOrchestrator(ProposalAutonomousOrchestrator):
     """Runtime orchestrator with guarded dynamic reviews and cross-process retries."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
@@ -180,8 +180,6 @@ def _sync_persisted_reviews(
     persisted_by_key = {review.key: review for review in persisted}
     in_memory = {review.key: review for review in queue.pending()}
 
-    # Strategy retry reviews can be cancelled by the dispatcher after a successful
-    # analysis, so mirror those deletions into the long-running orchestrator queue.
     for key, review in in_memory.items():
         if review.source == "strategy_retry" and key not in persisted_by_key:
             queue.remove(review)
@@ -234,8 +232,6 @@ def _actionable_next_review_at(value: datetime, now: datetime) -> datetime | Non
 
 
 def main() -> None:
-    # Keep the mature CLI/API implementations while replacing only the runtime
-    # orchestrator and the strategy dispatcher used by the API lifespan.
     cli_main.AutonomousOrchestrator = AutonomousOrchestrator  # type: ignore[attr-defined]
     api_module.__dict__["StrategyDispatcher"] = ResilientStrategyDispatcher
     cli_main.main()
