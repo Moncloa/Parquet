@@ -13,10 +13,22 @@ REQUEST_MARKER = "[PARQUET:REVIEW_REQUEST]"
 
 
 class GitHubBridge:
-    def __init__(self, repository: str, pr_number: int, token_file: Path) -> None:
+    def __init__(
+        self,
+        repository: str,
+        pr_number: int,
+        token_file: Path,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.repository = repository
         self.pr_number = pr_number
         self.token_file = token_file
+        self.transport = transport
+        # Runtime PRs are append-only in normal operation. Start from page 1 after a
+        # process restart so an existing cursor can catch up, then remember the last
+        # populated page to avoid rescanning the whole thread on every poll.
+        self._comments_page_hint = 1
 
     def _token(self) -> str:
         token = self.token_file.read_text(encoding="utf-8").strip()
@@ -33,13 +45,36 @@ class GitHubBridge:
 
     async def comments(self) -> list[dict[str, Any]]:
         url = f"https://api.github.com/repos/{self.repository}/issues/{self.pr_number}/comments"
-        async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(url, headers=self._headers(), params={"per_page": "100"})
-            response.raise_for_status()
-            data = response.json()
-        if not isinstance(data, list):
-            raise RuntimeError("Unexpected GitHub comments response")
-        return data
+        comments: list[dict[str, Any]] = []
+        page = max(1, self._comments_page_hint)
+        last_nonempty_page = max(1, page - 1)
+
+        async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
+            while True:
+                response = await client.get(
+                    url,
+                    headers=self._headers(),
+                    params={"per_page": "100", "page": str(page)},
+                )
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, list):
+                    raise RuntimeError("Unexpected GitHub comments response")
+
+                if not data:
+                    # A page can disappear after deletions; move the hint back to the
+                    # last page that actually contained comments.
+                    self._comments_page_hint = last_nonempty_page
+                    break
+
+                comments.extend(data)
+                last_nonempty_page = page
+                if len(data) < 100:
+                    self._comments_page_hint = page
+                    break
+                page += 1
+
+        return comments
 
     async def post_review_request(self, request: ReviewRequest) -> None:
         await self._post(REQUEST_MARKER, request.model_dump_json(indent=2))
@@ -50,7 +85,7 @@ class GitHubBridge:
     async def _post(self, marker: str, payload: str) -> None:
         url = f"https://api.github.com/repos/{self.repository}/issues/{self.pr_number}/comments"
         body = f"{marker}\n```json\n{payload}\n```"
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
             response = await client.post(url, headers=self._headers(), json={"body": body})
             response.raise_for_status()
 
