@@ -7,10 +7,10 @@ from parquet.resilient_strategy import (
     ResilientStrategyDispatcher,
     _is_usage_limit_error,
 )
+from parquet.runtime_entrypoint import _sync_persisted_reviews
 from parquet.scheduler import ReviewQueue, ScheduledReview
 from parquet.storage import Storage
 from parquet.strategy import StrategyQueue
-from parquet.runtime_entrypoint import _sync_persisted_reviews
 
 
 def _request() -> ReviewRequest:
