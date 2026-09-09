@@ -76,9 +76,13 @@ class EtoroUniverseClient:
                 "/market-data/instruments",
                 params={"instrumentIds": ",".join(str(value) for value in batch)},
             )
-            # Official eToro response key is `instrumentDisplayDatas` and its
-            # field names differ from the search/rates endpoints.
-            for item in _items(body, "instrumentDisplayDatas"):
+            # Current official eToro response key is `instrumentDisplayDatas`.
+            # Keep the older `instruments` envelope compatible because API shapes
+            # and existing fixtures may still expose it.
+            items = _items(body, "instrumentDisplayDatas")
+            if not items:
+                items = _items(body, "instruments")
+            for item in items:
                 raw_id = _first(item, "instrumentID", "instrumentId", "InstrumentID")
                 if raw_id is None:
                     continue
