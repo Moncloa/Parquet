@@ -11,6 +11,10 @@ from parquet.proposal_orchestrator import AutonomousOrchestrator, _latest_active
 
 
 class FakeMarketClient:
+    api_key = "test-api-key"
+    user_key = "test-user-key"
+    base_url = "https://example.invalid/api/v1"
+
     def __init__(self, rate: InstrumentRate) -> None:
         self.rate = rate
 
@@ -99,7 +103,6 @@ async def test_immediate_proposal_is_shadow_executed_automatically(tmp_path) -> 
     assert attempts[0].proposal_id == proposal.proposal_id
     assert attempts[0].state == ExecutionAttemptState.SHADOW_EXECUTED
 
-    # The durable attempt makes repeated polling idempotent.
     assert await orchestrator.poll_active_proposals_once(now + timedelta(seconds=5)) == 0
     assert len(orchestrator.storage.latest_execution_attempts()) == 1
 
