@@ -237,7 +237,7 @@ def main() -> None:
     # Keep the mature CLI/API implementations while replacing only the runtime
     # orchestrator and the strategy dispatcher used by the API lifespan.
     cli_main.AutonomousOrchestrator = AutonomousOrchestrator  # type: ignore[attr-defined]
-    api_module.StrategyDispatcher = ResilientStrategyDispatcher
+    api_module.__dict__["StrategyDispatcher"] = ResilientStrategyDispatcher
     cli_main.main()
 
 
