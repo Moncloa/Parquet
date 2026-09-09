@@ -159,14 +159,16 @@ def run_request_review_now(settings_path: Path | None, reason: str) -> int:
         return posted, current
 
     posted, requested_at = asyncio.run(request())
-    if posted != 1:
-        raise RuntimeError(f"Expected one manual review request to be posted, got {posted}")
+    if posted < 1:
+        raise RuntimeError(f"Expected the manual review request to be posted, got {posted}")
 
     print("Manual review request posted")
     print(f"  reason: {normalized_reason}")
     print(f"  requested_at: {requested_at.isoformat()}")
     print(f"  repository: {settings.github.repository}")
     print(f"  runtime_pr: {settings.github.runtime_pr}")
+    if posted > 1:
+        print(f"  additional_due_reviews_posted: {posted - 1}")
     print("Current eToro market context and risk snapshot were attached.")
     print("No broker order was sent.")
     return 0
