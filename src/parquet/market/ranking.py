@@ -44,13 +44,20 @@ def rank_stream_candidates(
         )
 
         direction = 1 if overall_change > 0 else -1 if overall_change < 0 else 0
-        nonzero_steps = [value for value in step_returns_bps if value != 0]
         aligned_steps = (
-            sum(1 for value in nonzero_steps if (value > 0) == (direction > 0))
+            sum(
+                1
+                for value in step_returns_bps
+                if value != 0 and (value > 0) == (direction > 0)
+            )
             if direction != 0
             else 0
         )
-        persistence = 0.0 if not nonzero_steps else aligned_steps / len(nonzero_steps)
+        # Flat steps matter: a single jump after a long flat period must not look
+        # as persistent as a move that advances in the same direction repeatedly.
+        persistence = (
+            0.0 if not step_returns_bps else aligned_steps / len(step_returns_bps)
+        )
 
         absolute_steps = [abs(value) for value in step_returns_bps]
         total_absolute_bps = sum(absolute_steps)
@@ -66,10 +73,13 @@ def rank_stream_candidates(
         activity = min(1.0, tick_rate_per_min / 5.0)
         direction_quality = (persistence + directional_efficiency) / 2.0
 
-        score = momentum * (0.55 + 0.30 * direction_quality + 0.15 * activity)
-        score += min(volatility_bps, 50.0) / 200.0
-        score += min(max(acceleration_pct_per_min, 0.0), 1.0) * 0.20
-        score -= spike_ratio * 0.40
+        score = momentum * (0.45 + 0.40 * direction_quality + 0.15 * activity)
+        # Volatility is useful context, but it must not make a single jump rank
+        # above a sustained move of similar magnitude.
+        score += min(volatility_bps, 30.0) / 600.0
+        score += min(max(acceleration_pct_per_min, 0.0), 1.0) * 0.10
+        score += persistence * 0.10
+        score -= spike_ratio * 0.65
 
         spread_raw = item.get("spread_bps")
         spread_bps = _optional_float(spread_raw)
