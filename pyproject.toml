@@ -31,7 +31,7 @@ dev = [
 [project.scripts]
 parquet = "parquet.main:main"
 parquet-live-test = "parquet.live_test:main"
-parquet-strategy-worker = "parquet.strategy:main"
+parquet-strategy-worker = "parquet.strategy_worker:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/parquet"]
