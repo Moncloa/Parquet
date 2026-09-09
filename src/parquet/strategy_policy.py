@@ -53,8 +53,10 @@ Review request JSON:
 
 def main() -> None:
     # Keep the isolated stdin worker and all of its security/validation behavior,
-    # replacing only the strategy policy prompt used for each analysis.
-    strategy_worker._strategy_prompt = opportunity_strategy_prompt
+    # replacing only the strategy policy prompt used for each analysis. The worker
+    # intentionally imports this private helper as a module global, so install the
+    # replacement through the module namespace without weakening static typing.
+    strategy_worker.__dict__["_strategy_prompt"] = opportunity_strategy_prompt
     strategy_worker.main()
 
 
