@@ -341,20 +341,20 @@ def _frame_candidates(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
         return []
     if isinstance(value, dict):
         normalized = _normalize_dict(value)
-        candidates = [normalized]
+        result = [normalized]
         messages = normalized.get("messages")
         if isinstance(messages, (list, dict)):
-            candidates.extend(_frame_candidates(messages, depth=depth + 1))
+            result.extend(_frame_candidates(messages, depth=depth + 1))
         elif isinstance(messages, str):
             decoded = _json_value(messages)
             if decoded is not _INVALID_JSON:
-                candidates.extend(_frame_candidates(decoded, depth=depth + 1))
-        return candidates
+                result.extend(_frame_candidates(decoded, depth=depth + 1))
+        return result
     if isinstance(value, list):
-        candidates: list[dict[str, Any]] = []
+        list_result: list[dict[str, Any]] = []
         for item in value:
-            candidates.extend(_frame_candidates(item, depth=depth + 1))
-        return candidates
+            list_result.extend(_frame_candidates(item, depth=depth + 1))
+        return list_result
     if isinstance(value, str):
         decoded = _json_value(value)
         if decoded is not _INVALID_JSON:
