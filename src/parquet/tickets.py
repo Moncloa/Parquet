@@ -34,6 +34,8 @@ class PreparedRealSmallTicket:
     broker_minimum_usd: float | None
     maximum_safe_amount_usd: float
     exposure_usd: float
+    agent_virtual_equity_usd: float
+    prepared_equity_pct: float
 
 
 def recent_proposals(storage: Storage, *, limit: int = 20) -> list[ProposalRecord]:
@@ -48,6 +50,15 @@ def recent_proposals(storage: Storage, *, limit: int = 20) -> list[ProposalRecor
         )
         for row in rows
     ]
+
+
+def amount_from_equity_pct(*, equity_usd: float | None, equity_pct: float) -> float:
+    """Convert an Agent Portfolio equity percentage to virtual USD capital."""
+    if equity_usd is None or equity_usd <= 0:
+        raise RuntimeError("Agent Portfolio equity is unavailable for percentage sizing")
+    if equity_pct <= 0 or equity_pct > 100:
+        raise RuntimeError("Requested Agent Portfolio percentage must be > 0 and <= 100")
+    return equity_usd * equity_pct / 100
 
 
 def choose_real_small_amount(
@@ -192,7 +203,10 @@ async def prepare_real_small_ticket(
     *,
     proposal_id: str,
     requested_amount_usd: float | None = None,
+    requested_equity_pct: float | None = None,
 ) -> PreparedRealSmallTicket:
+    if requested_amount_usd is not None and requested_equity_pct is not None:
+        raise RuntimeError("Specify either virtual USD amount or equity percentage, not both")
     if not settings.etoro.enabled:
         raise RuntimeError("eToro is disabled")
     if settings.etoro.expected_gcid is None:
@@ -217,6 +231,16 @@ async def prepare_real_small_ticket(
     snapshot = orchestrator.storage.get_risk_snapshot()
     if snapshot is None:
         raise RuntimeError("Risk snapshot unavailable after reconciliation")
+    if snapshot.equity_usd is None or snapshot.equity_usd <= 0:
+        raise RuntimeError("Agent Portfolio equity unavailable after reconciliation")
+
+    requested_virtual_amount = requested_amount_usd
+    if requested_equity_pct is not None:
+        requested_virtual_amount = amount_from_equity_pct(
+            equity_usd=snapshot.equity_usd,
+            equity_pct=requested_equity_pct,
+        )
+
     market = orchestrator.market_client
     if market is None:
         raise RuntimeError("eToro market client is unavailable")
@@ -250,7 +274,7 @@ async def prepare_real_small_ticket(
             gate_maximum_notional_usd=decision.amount_usd,
             supervised_cap_usd=settings.execution.supervised_real_max_amount_usd,
             max_leverage=settings.execution.supervised_real_max_leverage,
-            requested_amount_usd=requested_amount_usd,
+            requested_amount_usd=requested_virtual_amount,
         )
     )
     exposure_usd = chosen_amount * leverage
@@ -293,6 +317,8 @@ async def prepare_real_small_ticket(
         broker_minimum_usd=broker_minimum,
         maximum_safe_amount_usd=maximum_safe,
         exposure_usd=exposure_usd,
+        agent_virtual_equity_usd=snapshot.equity_usd,
+        prepared_equity_pct=chosen_amount / snapshot.equity_usd * 100,
     )
 
 
