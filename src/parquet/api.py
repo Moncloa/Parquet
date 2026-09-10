@@ -67,7 +67,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         execution_uncertain = orchestrator.storage.get("execution_uncertain") == "1"
         reconciliation_ready = reconciliation is not None and reconciliation.trading_enabled
         broker_execution_ready = (
-            settings.execution.supervised_real_enabled
+            _real_broker_configured(settings)
             and identity_verified
             and reconciliation_ready
             and not execution_uncertain
@@ -116,6 +116,11 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "autonomous_trading_enabled": reconciliation_ready,
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
+            "autonomous_real_execution": settings.execution.autonomous_real_enabled,
+            "autonomous_real_max_position_pct": (
+                settings.execution.autonomous_real_max_position_pct
+            ),
+            "autonomous_real_max_leverage": settings.execution.autonomous_real_max_leverage,
             "supervised_real_execution": settings.execution.supervised_real_enabled,
             "supervised_real_max_amount_usd": (
                 settings.execution.supervised_real_max_amount_usd
@@ -142,7 +147,7 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         execution_uncertain = orchestrator.storage.get("execution_uncertain") == "1"
         reconciliation_ready = reconciliation is not None and reconciliation.trading_enabled
         broker_execution_ready = (
-            settings.execution.supervised_real_enabled
+            _real_broker_configured(settings)
             and identity_verified
             and reconciliation_ready
             and not execution_uncertain
@@ -227,6 +232,11 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "strategy_last_error_at": orchestrator.storage.get("strategy_last_error_at"),
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
+            "autonomous_real_execution": settings.execution.autonomous_real_enabled,
+            "autonomous_real_max_position_pct": (
+                settings.execution.autonomous_real_max_position_pct
+            ),
+            "autonomous_real_max_leverage": settings.execution.autonomous_real_max_leverage,
             "supervised_real_execution": settings.execution.supervised_real_enabled,
             "supervised_real_max_amount_usd": (
                 settings.execution.supervised_real_max_amount_usd
@@ -250,6 +260,15 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
         }
 
     return app
+
+
+def _real_broker_configured(settings: Settings) -> bool:
+    autonomous_real = (
+        settings.execution.autonomous_enabled
+        and settings.execution.autonomous_mode == "real"
+        and settings.execution.autonomous_real_enabled
+    )
+    return settings.execution.supervised_real_enabled or autonomous_real
 
 
 def _websocket_state(orchestrator: Orchestrator) -> dict[str, object]:
