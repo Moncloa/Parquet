@@ -30,9 +30,13 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
                 self.storage,
                 self.market_client,
             )
+            api_key = self.settings.etoro.api_key_file.read_text(encoding="utf-8").strip()
+            user_key = self.settings.etoro.user_key_file.read_text(encoding="utf-8").strip()
+            if not api_key or not user_key:
+                raise RuntimeError("Empty eToro credentials for autonomous real execution")
             self._real_execution_client = EtoroExecutionClient(
-                api_key=_read_secret(self.settings.etoro.api_key_file, "eToro API key"),
-                user_key=_read_secret(self.settings.etoro.user_key_file, "eToro User key"),
+                api_key=api_key,
+                user_key=user_key,
                 base_url=self.settings.etoro.execution_base_url,
                 identity_base_url=self.settings.etoro.base_url,
             )
@@ -305,10 +309,3 @@ def _latest_active_proposals(storage, now: datetime) -> list[TradeProposal]:  # 
         (analysis_id, now.astimezone(UTC).isoformat()),
     ).fetchall()
     return [TradeProposal.model_validate_json(str(row[0])) for row in rows]
-
-
-def _read_secret(path, label: str) -> str:  # type: ignore[no-untyped-def]
-    value = path.read_text(encoding="utf-8").strip()
-    if not value:
-        raise RuntimeError(f"Empty {label}: {path}")
-    return value
