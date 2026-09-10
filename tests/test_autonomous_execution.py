@@ -52,9 +52,9 @@ def _synced(storage: Storage, now: datetime) -> None:
     )
 
 
-def test_autonomous_config_rejects_real_mode() -> None:
-    with pytest.raises(ValueError, match="shadow or demo"):
-        ExecutionConfig(autonomous_enabled=True, autonomous_mode="real")
+def test_autonomous_config_accepts_real_mode_but_keeps_real_disabled() -> None:
+    config = ExecutionConfig(autonomous_enabled=True, autonomous_mode="real")
+    assert config.autonomous_real_enabled is False
 
 
 def test_prepare_is_idempotent_for_same_proposal(tmp_path) -> None:
