@@ -77,6 +77,9 @@ class ExecutionConfig(BaseModel):
     live_test_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
     autonomous_enabled: bool = False
     autonomous_mode: str = "shadow"
+    autonomous_real_enabled: bool = False
+    autonomous_real_max_position_pct: float = Field(default=12.5, gt=0, le=100)
+    autonomous_real_max_leverage: int = Field(default=2, ge=1, le=100)
     supervised_real_enabled: bool = False
     supervised_real_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
     supervised_real_max_leverage: int = Field(default=20, ge=1, le=100)
@@ -85,8 +88,8 @@ class ExecutionConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_autonomous_mode(self) -> ExecutionConfig:
-        if self.autonomous_mode not in {"shadow", "demo"}:
-            raise ValueError("autonomous_mode must be shadow or demo")
+        if self.autonomous_mode not in {"shadow", "demo", "real"}:
+            raise ValueError("autonomous_mode must be shadow, demo or real")
         return self
 
 
