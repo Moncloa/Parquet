@@ -18,9 +18,10 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
         self,
         attempt: ExecutionAttempt,
         *,
+        confirmation: str = "",
         now: datetime | None = None,
     ) -> ExecutionAttempt:
-        return await super().execute(attempt, confirmation="", now=now)
+        return await super().execute(attempt, confirmation=confirmation, now=now)
 
     def _assert_supervised_allowed(
         self,
