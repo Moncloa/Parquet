@@ -182,10 +182,13 @@ class PositionManager:
             broker_visibility_age = (
                 snapshot.captured_at.astimezone(UTC) - local.opened_at.astimezone(UTC)
             ).total_seconds()
-            if broker_visibility_age < _POST_TRADE_VISIBILITY_GRACE_SECONDS:
+            if (
+                local.last_seen_at is None
+                and broker_visibility_age < _POST_TRADE_VISIBILITY_GRACE_SECONDS
+            ):
                 # A filled order can become visible in the portfolio endpoint a few
                 # seconds after the execution lookup confirms its position id. Keep
-                # the freshly registered position OPEN during that propagation window.
+                # a never-seen freshly registered position OPEN during propagation.
                 continue
             closed = local.model_copy(
                 update={
