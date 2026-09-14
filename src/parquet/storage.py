@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 
-from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
+from parquet.execution.autonomous import ExecutionAttempt
 from parquet.models import RiskSnapshot, TradeProposal, WatchItem
 from parquet.portfolio import (
     BrokerPortfolioSnapshot,
@@ -337,17 +337,17 @@ class Storage:
     def get_active_execution_attempt_for_proposal(
         self, proposal_id: str
     ) -> ExecutionAttempt | None:
-        terminal = (
-            ExecutionAttemptState.REJECTED.value,
-            ExecutionAttemptState.BLOCKED.value,
-            ExecutionAttemptState.RECONCILED.value,
-        )
+        """Return the latest attempt for a proposal, regardless of terminal state.
+
+        A proposal id is a one-shot execution intent.  Once any attempt has been
+        persisted for it (including REJECTED or RECONCILED), autonomous polling must
+        never create another broker submission for the same proposal id.
+        """
         with self._lock:
             row = self.conn.execute(
                 "SELECT payload FROM execution_attempts "
-                "WHERE proposal_id = ? AND state NOT IN (?, ?, ?) "
-                "ORDER BY updated_at DESC LIMIT 1",
-                (proposal_id, *terminal),
+                "WHERE proposal_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (proposal_id,),
             ).fetchone()
         if row is None:
             return None

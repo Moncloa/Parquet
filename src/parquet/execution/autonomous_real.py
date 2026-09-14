@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+from datetime import UTC, datetime
 
 from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
 from parquet.execution.supervised import RealSmallExecutionAdapter
+from parquet.portfolio import ReconciliationState
 
 
 class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
@@ -21,7 +23,59 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
         confirmation: str = "",
         now: datetime | None = None,
     ) -> ExecutionAttempt:
-        return await super().execute(attempt, confirmation=confirmation, now=now)
+        result = await super().execute(attempt, confirmation=confirmation, now=now)
+        if (
+            result.state == ExecutionAttemptState.OUTCOME_UNKNOWN
+            and result.reason == "filled_position_not_visible_after_reconciliation"
+            and result.broker_position_id is not None
+        ):
+            return await self._recover_delayed_position_visibility(result)
+        return result
+
+    async def _recover_delayed_position_visibility(
+        self,
+        attempt: ExecutionAttempt,
+    ) -> ExecutionAttempt:
+        """Retry read-only reconciliation when a confirmed fill propagates slowly.
+
+        eToro can acknowledge a filled order before the new position is visible in the
+        portfolio endpoint.  Never repeat the write: only poll broker state.  If the
+        position becomes visible, resolve the uncertainty and persist RECONCILED;
+        otherwise preserve OUTCOME_UNKNOWN so execution remains fail-closed.
+        """
+
+        attempts = self.settings.execution.broker_lookup_attempts
+        interval = self.settings.execution.broker_lookup_interval_seconds
+        for index in range(attempts):
+            if index > 0 and interval > 0:
+                await asyncio.sleep(interval)
+            await self.reconciliation.poll_once(force=True)
+            report = self.storage.get_reconciliation_report()
+            snapshot = self.storage.get_broker_portfolio_snapshot()
+            if (
+                report is not None
+                and report.state == ReconciliationState.SYNCED
+                and snapshot is not None
+                and any(
+                    position.position_id == attempt.broker_position_id
+                    for position in snapshot.positions
+                )
+            ):
+                reconciled = attempt.model_copy(
+                    update={
+                        "state": ExecutionAttemptState.RECONCILED,
+                        "reason": None,
+                        "updated_at": datetime.now(UTC),
+                    }
+                )
+                self.storage.save_execution_attempt(reconciled)
+                self.storage.set("execution_uncertain", "0")
+                self.storage.add_event(
+                    "autonomous_real_delayed_reconciliation_recovered",
+                    reconciled.model_dump_json(),
+                )
+                return reconciled
+        return attempt
 
     def _assert_supervised_allowed(
         self,
