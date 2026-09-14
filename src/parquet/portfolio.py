@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+_POST_TRADE_VISIBILITY_GRACE_SECONDS = 20.0
+
 
 class ReconciliationState(StrEnum):
     SYNCED = "SYNCED"
@@ -177,6 +179,14 @@ class PositionManager:
 
         for broker_id in sorted(set(local_positions) - set(broker_positions)):
             local = local_positions[broker_id]
+            broker_visibility_age = (
+                snapshot.captured_at.astimezone(UTC) - local.opened_at.astimezone(UTC)
+            ).total_seconds()
+            if broker_visibility_age < _POST_TRADE_VISIBILITY_GRACE_SECONDS:
+                # A filled order can become visible in the portfolio endpoint a few
+                # seconds after the execution lookup confirms its position id. Keep
+                # the freshly registered position OPEN during that propagation window.
+                continue
             closed = local.model_copy(
                 update={
                     "status": "CLOSED_AT_BROKER",
