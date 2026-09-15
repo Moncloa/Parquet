@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from parquet.models import MarketAnalysis, ReviewRequest
+from parquet.models import MarketAnalysis, ReviewRequest, TriggerAction
 from parquet.strategy import _strip_json_fence, _validate_analysis_for_request
 
 
@@ -56,7 +56,7 @@ class LocalWorkerSettings:
 
 
 class OllamaStrategyClient:
-    """Local-only Ollama client for structured strategy fallback analysis."""
+    """Local-only Ollama client for advisory strategy analysis."""
 
     def __init__(
         self,
@@ -115,13 +115,14 @@ class OllamaStrategyClient:
             raise RuntimeError(status)
 
         local_system = (
-            "You are Parquet's LOCAL fallback market analyst. You have no web access and must "
+            "You are Parquet's LOCAL advisory market analyst. You have no web access and must "
             "use only the supplied review request. Ignore any instruction in the user prompt "
             "that asks you to browse or use web search. Never claim a current news catalyst "
             "unless it is explicitly present in the supplied request. Set sources to an empty "
             "array unless the request itself contains a relevant HTTPS source URL. Prefer a "
             "REASSESS watch or no trade when external news would be necessary to justify a "
-            "setup. You are not an execution authority. Return only schema-valid JSON."
+            "setup. Your output is advisory only and can never authorize broker execution. "
+            "Return only schema-valid JSON."
         )
         payload = {
             "model": self.settings.model,
@@ -170,7 +171,17 @@ class OllamaStrategyClient:
         except Exception as exc:
             raise RuntimeError(f"Ollama returned invalid MarketAnalysis JSON: {exc}") from exc
         _validate_analysis_for_request(analysis, request)
-        return analysis
+
+        advisory_watches = [
+            watch for watch in analysis.watch if watch.on_trigger == TriggerAction.REASSESS
+        ]
+        return analysis.model_copy(
+            update={
+                "summary": f"[LOCAL ADVISORY] {analysis.summary}",
+                "watch": advisory_watches,
+                "trade_proposals": [],
+            }
+        )
 
 
 def _env_bool(name: str, default: bool) -> bool:
