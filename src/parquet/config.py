@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -58,6 +59,29 @@ class EtoroConfig(BaseModel):
     websocket_shortlist_size: int = Field(default=20, ge=5, le=100)
     websocket_rotation_minutes: int = Field(default=15, ge=5, le=240)
     websocket_points_per_instrument: int = Field(default=1000, ge=20, le=5000)
+
+
+class LocalScreenerConfig(BaseModel):
+    enabled: bool = True
+    base_url: str = "http://127.0.0.1:11434"
+    model: str = "qwen3.5:4b"
+    input_candidates: int = Field(default=10, ge=3, le=30)
+    output_candidates: int = Field(default=3, ge=1, le=5)
+    timeout_seconds: int = Field(default=45, ge=5, le=180)
+    keep_alive: str = "15m"
+    context_length: int = Field(default=4096, ge=2048, le=32768)
+    max_output_tokens: int = Field(default=160, ge=64, le=512)
+
+    @model_validator(mode="after")
+    def validate_local_endpoint(self) -> LocalScreenerConfig:
+        parsed = urlparse(self.base_url)
+        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("local_screener.base_url must use HTTP on loopback")
+        if self.output_candidates > self.input_candidates:
+            raise ValueError("local_screener.output_candidates cannot exceed input_candidates")
+        if not self.model.strip():
+            raise ValueError("local_screener.model cannot be empty")
+        return self
 
 
 class StrategyConfig(BaseModel):
@@ -132,6 +156,7 @@ class Settings(BaseModel):
     keys: KeyConfig = Field(default_factory=KeyConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     etoro: EtoroConfig = Field(default_factory=EtoroConfig)
+    local_screener: LocalScreenerConfig = Field(default_factory=LocalScreenerConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
@@ -160,6 +185,8 @@ def load_settings(path: Path | None = None) -> Settings:
         "PARQUET_GITHUB_TOKEN_FILE": (["github", "token_file"], str),
         "PARQUET_ETORO_API_KEY_FILE": (["etoro", "api_key_file"], str),
         "PARQUET_ETORO_USER_KEY_FILE": (["etoro", "user_key_file"], str),
+        "PARQUET_LOCAL_SCREENER_URL": (["local_screener", "base_url"], str),
+        "PARQUET_LOCAL_SCREENER_MODEL": (["local_screener", "model"], str),
     }
     for env_name, (keys, cast) in env_overrides.items():
         if env_name in os.environ:
