@@ -20,8 +20,8 @@ class LocalScreenLabel(StrEnum):
 class LocalScreenDecision(BaseModel):
     symbol: str = Field(min_length=1)
     classification: LocalScreenLabel
-    score: int = Field(ge=0, le=100)
-    reason: str = Field(min_length=1, max_length=180)
+    score: int = Field(ge=1, le=100)
+    reason: str = Field(min_length=1, max_length=140)
 
 
 class LocalScreenResult(BaseModel):
@@ -33,6 +33,15 @@ class LocalScreenResult(BaseModel):
         if len(symbols) != len(set(symbols)):
             raise ValueError("local screener returned duplicate symbols")
         return self
+
+
+class LocalScreenerTelemetry(BaseModel):
+    load_ms: float | None = None
+    prompt_tokens: int | None = None
+    prompt_ms: float | None = None
+    eval_tokens: int | None = None
+    eval_ms: float | None = None
+    eval_tokens_per_second: float | None = None
 
 
 class LocalScreenerClient:
@@ -51,10 +60,13 @@ class LocalScreenerClient:
         self.config = config
         self.transport = transport
 
-    async def screen(self, candidates: list[dict[str, Any]]) -> tuple[LocalScreenResult, float]:
+    async def screen(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> tuple[LocalScreenResult, float, LocalScreenerTelemetry]:
         compact = _compact_candidates(candidates[: self.config.input_candidates])
         if not compact:
-            return LocalScreenResult(), 0.0
+            return LocalScreenResult(), 0.0, LocalScreenerTelemetry()
 
         allowed = {str(item["symbol"]).upper() for item in compact}
         schema = LocalScreenResult.model_json_schema()
@@ -66,8 +78,12 @@ class LocalScreenerClient:
             f"Return at most {self.config.output_candidates} candidates. Choose only symbols "
             "from the input. Use MOMENTUM for clean directional continuation, MEAN_REVERSION "
             "for an overextended/noisy reversal candidate, WATCH when interesting but not "
-            "clear enough. Return an empty shortlist if none deserves escalation. Keep each "
-            "reason factual and under 20 words.\n\nCandidates:\n"
+            "clear enough. Return an empty shortlist if none deserves escalation. "
+            "The output score is an independent advisory confidence from 1 to 100; it is NOT "
+            "the deterministic_rank_score from the input. Use 50 for borderline evidence, "
+            "70 for clear evidence and 90+ only for exceptional evidence. Omit candidates "
+            "below 50 rather than returning a low score. Keep each reason factual and under "
+            "12 words.\n\nCandidates:\n"
             + json.dumps(compact, separators=(",", ":"), sort_keys=True)
         )
         payload = {
@@ -124,12 +140,11 @@ class LocalScreenerClient:
         unknown = [item.symbol for item in result.shortlist if item.symbol.upper() not in allowed]
         if unknown:
             raise RuntimeError(f"local screener returned unknown symbols: {unknown}")
-        return result, elapsed
+        return result, elapsed, _telemetry_from_body(body)
 
 
 def _compact_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, object]]:
     fields = (
-        "symbol",
         "score",
         "change_pct_stream",
         "change_pct_2m",
@@ -150,9 +165,46 @@ def _compact_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, obje
         if not isinstance(symbol, str) or not symbol.strip():
             continue
         item: dict[str, object] = {"symbol": symbol}
-        for field in fields[1:]:
+        for field in fields:
             value = candidate.get(field)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                item[field] = value
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            output_field = "deterministic_rank_score" if field == "score" else field
+            item[output_field] = value
         compact.append(item)
     return compact
+
+
+def _telemetry_from_body(body: object) -> LocalScreenerTelemetry:
+    if not isinstance(body, dict):
+        return LocalScreenerTelemetry()
+
+    load_ns = _optional_number(body.get("load_duration"))
+    prompt_count = _optional_int(body.get("prompt_eval_count"))
+    prompt_ns = _optional_number(body.get("prompt_eval_duration"))
+    eval_count = _optional_int(body.get("eval_count"))
+    eval_ns = _optional_number(body.get("eval_duration"))
+    eval_tps = None
+    if eval_count is not None and eval_ns is not None and eval_ns > 0:
+        eval_tps = eval_count / (eval_ns / 1_000_000_000.0)
+
+    return LocalScreenerTelemetry(
+        load_ms=None if load_ns is None else round(load_ns / 1_000_000.0, 1),
+        prompt_tokens=prompt_count,
+        prompt_ms=None if prompt_ns is None else round(prompt_ns / 1_000_000.0, 1),
+        eval_tokens=eval_count,
+        eval_ms=None if eval_ns is None else round(eval_ns / 1_000_000.0, 1),
+        eval_tokens_per_second=None if eval_tps is None else round(eval_tps, 3),
+    )
+
+
+def _optional_number(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
