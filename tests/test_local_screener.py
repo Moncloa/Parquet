@@ -47,7 +47,17 @@ async def test_local_screener_is_batched_structured_and_non_thinking() -> None:
                 },
             ]
         }
-        return httpx.Response(200, json={"message": {"content": json.dumps(result)}})
+        return httpx.Response(
+            200,
+            json={
+                "message": {"content": json.dumps(result)},
+                "load_duration": 5_000_000,
+                "prompt_eval_count": 200,
+                "prompt_eval_duration": 2_000_000_000,
+                "eval_count": 60,
+                "eval_duration": 10_000_000_000,
+            },
+        )
 
     config = LocalScreenerConfig(input_candidates=10, output_candidates=3)
     client = LocalScreenerClient(config, transport=httpx.MockTransport(handler))
@@ -68,6 +78,14 @@ async def test_local_screener_is_batched_structured_and_non_thinking() -> None:
     assert '"deterministic_rank_score"' in prompt
     assert "independent advisory confidence" in prompt
     assert captured["options"]["num_predict"] == 128
+    assert client.last_telemetry == {
+        "load_ms": 5.0,
+        "prompt_tokens": 200,
+        "prompt_ms": 2000.0,
+        "eval_tokens": 60,
+        "eval_ms": 10000.0,
+        "eval_tokens_per_second": 6.0,
+    }
 
 
 @pytest.mark.asyncio
