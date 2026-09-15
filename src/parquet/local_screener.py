@@ -50,10 +50,12 @@ class LocalScreenerClient:
     ) -> None:
         self.config = config
         self.transport = transport
+        self.last_telemetry: dict[str, object] = {}
 
     async def screen(self, candidates: list[dict[str, Any]]) -> tuple[LocalScreenResult, float]:
         compact = _compact_candidates(candidates[: self.config.input_candidates])
         if not compact:
+            self.last_telemetry = {}
             return LocalScreenResult(), 0.0
 
         allowed = {str(item["symbol"]).upper() for item in compact}
@@ -114,6 +116,7 @@ class LocalScreenerClient:
             body = response.json()
         except ValueError as exc:
             raise RuntimeError("local screener returned invalid Ollama JSON") from exc
+        self.last_telemetry = _ollama_telemetry(body)
         message = body.get("message") if isinstance(body, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
@@ -161,3 +164,44 @@ def _compact_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, obje
             item[output_field] = value
         compact.append(item)
     return compact
+
+
+def _ollama_telemetry(body: object) -> dict[str, object]:
+    if not isinstance(body, dict):
+        return {}
+
+    result: dict[str, object] = {}
+    load_ns = _number(body.get("load_duration"))
+    prompt_ns = _number(body.get("prompt_eval_duration"))
+    eval_ns = _number(body.get("eval_duration"))
+    prompt_count = _integer(body.get("prompt_eval_count"))
+    eval_count = _integer(body.get("eval_count"))
+
+    if load_ns is not None:
+        result["load_ms"] = round(load_ns / 1_000_000.0, 1)
+    if prompt_count is not None:
+        result["prompt_tokens"] = prompt_count
+    if prompt_ns is not None:
+        result["prompt_ms"] = round(prompt_ns / 1_000_000.0, 1)
+    if eval_count is not None:
+        result["eval_tokens"] = eval_count
+    if eval_ns is not None:
+        result["eval_ms"] = round(eval_ns / 1_000_000.0, 1)
+    if eval_count is not None and eval_ns is not None and eval_ns > 0:
+        result["eval_tokens_per_second"] = round(
+            eval_count / (eval_ns / 1_000_000_000.0),
+            3,
+        )
+    return result
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _integer(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
