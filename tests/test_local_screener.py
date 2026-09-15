@@ -65,6 +65,9 @@ async def test_local_screener_is_batched_structured_and_non_thinking() -> None:
     assert "SYM9" in prompt
     assert "SYM10" not in prompt
     assert '"points"' not in prompt
+    assert '"deterministic_rank_score"' in prompt
+    assert "independent advisory confidence" in prompt
+    assert captured["options"]["num_predict"] == 128
 
 
 @pytest.mark.asyncio
@@ -87,6 +90,29 @@ async def test_local_screener_rejects_invented_symbol() -> None:
         transport=httpx.MockTransport(handler),
     )
     with pytest.raises(RuntimeError, match="unknown symbols"):
+        await client.screen(_candidates())
+
+
+@pytest.mark.asyncio
+async def test_local_screener_rejects_zero_advisory_score() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        result = {
+            "shortlist": [
+                {
+                    "symbol": "SYM0",
+                    "classification": "WATCH",
+                    "score": 0,
+                    "reason": "Copied deterministic score.",
+                }
+            ]
+        }
+        return httpx.Response(200, json={"message": {"content": json.dumps(result)}})
+
+    client = LocalScreenerClient(
+        LocalScreenerConfig(),
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(RuntimeError, match="invalid structured output"):
         await client.screen(_candidates())
 
 
