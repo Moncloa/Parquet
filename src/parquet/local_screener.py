@@ -61,6 +61,7 @@ class LocalScreenerClient:
         compact = _compact_candidates(eligible[: self.config.input_candidates])
         if not compact:
             self.last_telemetry = {
+                "received_candidates": len(candidates),
                 "eligible_candidates": 0,
                 "min_deterministic_score": self.config.min_deterministic_score,
             }
@@ -128,8 +129,10 @@ class LocalScreenerClient:
         except ValueError as exc:
             raise RuntimeError("local screener returned invalid Ollama JSON") from exc
         self.last_telemetry = {
+            "received_candidates": len(candidates),
             "eligible_candidates": len(compact),
             "min_deterministic_score": self.config.min_deterministic_score,
+            "http_wall_ms": round(elapsed * 1000.0, 1),
             **_ollama_telemetry(body),
         }
         message = body.get("message") if isinstance(body, dict) else None
@@ -193,12 +196,15 @@ def _ollama_telemetry(body: object) -> dict[str, object]:
         return {}
 
     result: dict[str, object] = {}
+    total_ns = _number(body.get("total_duration"))
     load_ns = _number(body.get("load_duration"))
     prompt_ns = _number(body.get("prompt_eval_duration"))
     eval_ns = _number(body.get("eval_duration"))
     prompt_count = _integer(body.get("prompt_eval_count"))
     eval_count = _integer(body.get("eval_count"))
 
+    if total_ns is not None:
+        result["ollama_total_ms"] = round(total_ns / 1_000_000.0, 1)
     if load_ns is not None:
         result["load_ms"] = round(load_ns / 1_000_000.0, 1)
     if prompt_count is not None:
@@ -213,6 +219,15 @@ def _ollama_telemetry(body: object) -> dict[str, object]:
         result["eval_tokens_per_second"] = round(
             eval_count / (eval_ns / 1_000_000_000.0),
             3,
+        )
+
+    components_ns = sum(
+        value for value in (load_ns, prompt_ns, eval_ns) if value is not None
+    )
+    if total_ns is not None:
+        result["ollama_other_ms"] = round(
+            max(0.0, total_ns - components_ns) / 1_000_000.0,
+            1,
         )
     return result
 
