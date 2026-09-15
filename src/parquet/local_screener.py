@@ -20,8 +20,8 @@ class LocalScreenLabel(StrEnum):
 class LocalScreenDecision(BaseModel):
     symbol: str = Field(min_length=1)
     classification: LocalScreenLabel
-    score: int = Field(ge=0, le=100)
-    reason: str = Field(min_length=1, max_length=180)
+    score: int = Field(ge=1, le=100)
+    reason: str = Field(min_length=1, max_length=140)
 
 
 class LocalScreenResult(BaseModel):
@@ -50,10 +50,20 @@ class LocalScreenerClient:
     ) -> None:
         self.config = config
         self.transport = transport
+        self.last_telemetry: dict[str, object] = {}
 
     async def screen(self, candidates: list[dict[str, Any]]) -> tuple[LocalScreenResult, float]:
-        compact = _compact_candidates(candidates[: self.config.input_candidates])
+        eligible = [
+            candidate
+            for candidate in candidates
+            if _deterministic_score(candidate) >= self.config.min_deterministic_score
+        ]
+        compact = _compact_candidates(eligible[: self.config.input_candidates])
         if not compact:
+            self.last_telemetry = {
+                "eligible_candidates": 0,
+                "min_deterministic_score": self.config.min_deterministic_score,
+            }
             return LocalScreenResult(), 0.0
 
         allowed = {str(item["symbol"]).upper() for item in compact}
@@ -66,8 +76,15 @@ class LocalScreenerClient:
             f"Return at most {self.config.output_candidates} candidates. Choose only symbols "
             "from the input. Use MOMENTUM for clean directional continuation, MEAN_REVERSION "
             "for an overextended/noisy reversal candidate, WATCH when interesting but not "
-            "clear enough. Return an empty shortlist if none deserves escalation. Keep each "
-            "reason factual and under 20 words.\n\nCandidates:\n"
+            "clear enough. Return an empty shortlist if none deserves escalation. "
+            "The output score is an independent advisory confidence from 1 to 100; it is NOT "
+            "the deterministic_rank_score from the input. Use 50 for borderline evidence, "
+            "70 for clear evidence and 90+ only for exceptional evidence. Omit candidates "
+            "below 50 rather than returning a low score. directional_efficiency and persistence "
+            "are ratios from 0 to 1: below 0.30 is low, 0.30-0.70 is moderate, and above 0.70 "
+            "is high. A high spike_ratio means the move is concentrated in one jump and is "
+            "weaker evidence for clean momentum. Keep each reason factual and under 12 words.\n\n"
+            "Candidates:\n"
             + json.dumps(compact, separators=(",", ":"), sort_keys=True)
         )
         payload = {
@@ -110,6 +127,11 @@ class LocalScreenerClient:
             body = response.json()
         except ValueError as exc:
             raise RuntimeError("local screener returned invalid Ollama JSON") from exc
+        self.last_telemetry = {
+            "eligible_candidates": len(compact),
+            "min_deterministic_score": self.config.min_deterministic_score,
+            **_ollama_telemetry(body),
+        }
         message = body.get("message") if isinstance(body, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
@@ -129,7 +151,6 @@ class LocalScreenerClient:
 
 def _compact_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, object]]:
     fields = (
-        "symbol",
         "score",
         "change_pct_stream",
         "change_pct_2m",
@@ -150,9 +171,59 @@ def _compact_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, obje
         if not isinstance(symbol, str) or not symbol.strip():
             continue
         item: dict[str, object] = {"symbol": symbol}
-        for field in fields[1:]:
+        for field in fields:
             value = candidate.get(field)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                item[field] = value
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            output_field = "deterministic_rank_score" if field == "score" else field
+            item[output_field] = value
         compact.append(item)
     return compact
+
+
+def _deterministic_score(candidate: dict[str, Any]) -> float:
+    value = candidate.get("score")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return 0.0
+
+
+def _ollama_telemetry(body: object) -> dict[str, object]:
+    if not isinstance(body, dict):
+        return {}
+
+    result: dict[str, object] = {}
+    load_ns = _number(body.get("load_duration"))
+    prompt_ns = _number(body.get("prompt_eval_duration"))
+    eval_ns = _number(body.get("eval_duration"))
+    prompt_count = _integer(body.get("prompt_eval_count"))
+    eval_count = _integer(body.get("eval_count"))
+
+    if load_ns is not None:
+        result["load_ms"] = round(load_ns / 1_000_000.0, 1)
+    if prompt_count is not None:
+        result["prompt_tokens"] = prompt_count
+    if prompt_ns is not None:
+        result["prompt_ms"] = round(prompt_ns / 1_000_000.0, 1)
+    if eval_count is not None:
+        result["eval_tokens"] = eval_count
+    if eval_ns is not None:
+        result["eval_ms"] = round(eval_ns / 1_000_000.0, 1)
+    if eval_count is not None and eval_ns is not None and eval_ns > 0:
+        result["eval_tokens_per_second"] = round(
+            eval_count / (eval_ns / 1_000_000_000.0),
+            3,
+        )
+    return result
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _integer(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None

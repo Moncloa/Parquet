@@ -67,10 +67,11 @@ class LocalScreenerConfig(BaseModel):
     model: str = "qwen3.5:4b"
     input_candidates: int = Field(default=10, ge=3, le=30)
     output_candidates: int = Field(default=3, ge=1, le=5)
+    min_deterministic_score: float = Field(default=0.05, ge=0.0, le=10.0)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     keep_alive: str = "15m"
     context_length: int = Field(default=4096, ge=2048, le=32768)
-    max_output_tokens: int = Field(default=160, ge=64, le=512)
+    max_output_tokens: int = Field(default=128, ge=64, le=512)
 
     @model_validator(mode="after")
     def validate_local_endpoint(self) -> LocalScreenerConfig:
