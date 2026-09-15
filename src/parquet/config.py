@@ -70,7 +70,7 @@ class LocalScreenerConfig(BaseModel):
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     keep_alive: str = "15m"
     context_length: int = Field(default=4096, ge=2048, le=32768)
-    max_output_tokens: int = Field(default=160, ge=64, le=512)
+    max_output_tokens: int = Field(default=128, ge=64, le=512)
 
     @model_validator(mode="after")
     def validate_local_endpoint(self) -> LocalScreenerConfig:
