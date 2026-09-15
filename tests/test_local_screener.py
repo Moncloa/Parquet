@@ -51,6 +51,7 @@ async def test_local_screener_is_batched_structured_and_non_thinking() -> None:
             200,
             json={
                 "message": {"content": json.dumps(result)},
+                "total_duration": 12_500_000_000,
                 "load_duration": 5_000_000,
                 "prompt_eval_count": 200,
                 "prompt_eval_duration": 2_000_000_000,
@@ -79,16 +80,18 @@ async def test_local_screener_is_batched_structured_and_non_thinking() -> None:
     assert "independent advisory confidence" in prompt
     assert "below 0.30 is low" in prompt
     assert captured["options"]["num_predict"] == 128
-    assert client.last_telemetry == {
-        "eligible_candidates": 10,
-        "min_deterministic_score": 0.05,
-        "load_ms": 5.0,
-        "prompt_tokens": 200,
-        "prompt_ms": 2000.0,
-        "eval_tokens": 60,
-        "eval_ms": 10000.0,
-        "eval_tokens_per_second": 6.0,
-    }
+    assert client.last_telemetry["received_candidates"] == 12
+    assert client.last_telemetry["eligible_candidates"] == 10
+    assert client.last_telemetry["min_deterministic_score"] == 0.05
+    assert client.last_telemetry["ollama_total_ms"] == 12500.0
+    assert client.last_telemetry["load_ms"] == 5.0
+    assert client.last_telemetry["prompt_tokens"] == 200
+    assert client.last_telemetry["prompt_ms"] == 2000.0
+    assert client.last_telemetry["eval_tokens"] == 60
+    assert client.last_telemetry["eval_ms"] == 10000.0
+    assert client.last_telemetry["eval_tokens_per_second"] == 6.0
+    assert client.last_telemetry["ollama_other_ms"] == 495.0
+    assert float(client.last_telemetry["http_wall_ms"]) >= 0.0
 
 
 @pytest.mark.asyncio
@@ -114,6 +117,7 @@ async def test_local_screener_skips_candidates_below_deterministic_cutoff() -> N
     assert elapsed == 0.0
     assert called is False
     assert client.last_telemetry == {
+        "received_candidates": 3,
         "eligible_candidates": 0,
         "min_deterministic_score": 0.05,
     }
