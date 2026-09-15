@@ -8,7 +8,8 @@ fi
 
 OLLAMA_VERSION="${OLLAMA_VERSION:-0.34.0}"
 OLLAMA_SHA256="${OLLAMA_SHA256:-cf95886728959aa09910bb34de5cca1cc5a8f68003b5597197d3f2c2d57c0804}"
-MODEL="${PARQUET_LOCAL_LLM_MODEL:-hf.co/mradermacher/ODA-Fin-SFT-8B-GGUF:Q5_K_M}"
+SCREENER_MODEL="${PARQUET_LOCAL_SCREENER_MODEL:-qwen3.5:4b}"
+ANALYST_MODEL="${PARQUET_LOCAL_LLM_MODEL:-hf.co/mradermacher/ODA-Fin-SFT-8B-GGUF:Q5_K_M}"
 CONTEXT_LENGTH="${PARQUET_LOCAL_LLM_CONTEXT_LENGTH:-8192}"
 CPU_QUOTA="${PARQUET_LOCAL_LLM_CPU_QUOTA:-500%}"
 MEMORY_HIGH="${PARQUET_LOCAL_LLM_MEMORY_HIGH:-9G}"
@@ -89,16 +90,18 @@ if ! curl -fsS "$OLLAMA_URL/api/version" >/dev/null 2>&1; then
   exit 3
 fi
 
-echo "Pulling model: $MODEL"
-ollama pull "$MODEL"
-
-payload="$(jq -cn --arg model "$MODEL" '{model:$model}')"
-curl -fsS -H 'content-type: application/json' -d "$payload" "$OLLAMA_URL/api/show" >/dev/null
+for model in "$SCREENER_MODEL" "$ANALYST_MODEL"; do
+  echo "Pulling model: $model"
+  ollama pull "$model"
+  payload="$(jq -cn --arg model "$model" '{model:$model}')"
+  curl -fsS -H 'content-type: application/json' -d "$payload" "$OLLAMA_URL/api/show" >/dev/null
+done
 
 echo
-echo "Local LLM ready."
+echo "Local LLM runtime ready."
 echo "  endpoint: $OLLAMA_URL"
-echo "  model:    $MODEL"
+echo "  screener: $SCREENER_MODEL"
+echo "  analyst:  $ANALYST_MODEL"
 echo "  context:  $CONTEXT_LENGTH"
 echo "  CPU:      $CPU_QUOTA"
 echo "  memory:   high=$MEMORY_HIGH max=$MEMORY_MAX"
@@ -109,7 +112,4 @@ echo "  ollama list"
 echo "  ollama ps"
 echo "  journalctl -u ollama.service -n 100 --no-pager"
 echo
-echo "Alternative model example:"
-echo "  PARQUET_LOCAL_LLM_MODEL=qwen3.5:9b bash ./scripts/setup-local-llm.sh"
-echo
-echo "Ollama remains bound to loopback and is not connected to broker execution by this script."
+echo "Ollama remains bound to loopback. The Qwen screener is advisory-only and cannot create broker orders."
