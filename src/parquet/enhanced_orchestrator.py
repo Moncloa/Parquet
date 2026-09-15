@@ -9,6 +9,7 @@ from parquet.autonomous_orchestrator import (
     AutonomousOrchestrator as BaseAutonomousOrchestrator,
 )
 from parquet.autonomous_orchestrator import _filter_stream_candidates, _optional_int
+from parquet.local_screener import LocalScreenerClient
 from parquet.market.candles import EtoroCandleClient
 from parquet.market.ranking import rank_stream_candidates
 from parquet.models import MarketObservation, ReviewRequest
@@ -26,6 +27,11 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
                 user_key=self.market_client.user_key,
                 base_url=self.market_client.base_url,
             )
+        self.local_screener = (
+            LocalScreenerClient(self.settings.local_screener)
+            if self.settings.local_screener.enabled
+            else None
+        )
 
     def _ranked_stream_candidates(self) -> list[dict[str, Any]]:
         scanner = self.stream_scanner
@@ -152,6 +158,50 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
             symbols,
         )
 
+    async def _local_screener_context(
+        self,
+        stream_context: dict[str, object],
+        current: datetime,
+    ) -> dict[str, object]:
+        config = self.settings.local_screener
+        if self.local_screener is None:
+            return {"enabled": False, "status": "disabled", "model": config.model}
+        raw_candidates = stream_context.get("candidates")
+        if not isinstance(raw_candidates, list):
+            return {"enabled": True, "status": "no_candidates", "model": config.model}
+        candidates = [item for item in raw_candidates if isinstance(item, dict)]
+        if not candidates:
+            return {"enabled": True, "status": "no_candidates", "model": config.model}
+        try:
+            result, elapsed = await self.local_screener.screen(candidates)
+        except Exception as exc:
+            error = repr(exc)[:1000]
+            self.storage.set("local_screener_last_error", error)
+            self.storage.set("local_screener_last_error_at", current.astimezone(UTC).isoformat())
+            self.storage.add_event("local_screener_error", json.dumps({"error": error}))
+            return {
+                "enabled": True,
+                "status": "error",
+                "model": config.model,
+                "error": error,
+            }
+
+        payload: dict[str, object] = {
+            "enabled": True,
+            "status": "ok",
+            "model": config.model,
+            "evaluated_candidates": min(len(candidates), config.input_candidates),
+            "latency_ms": round(elapsed * 1000.0, 1),
+            "shortlist": [item.model_dump(mode="json") for item in result.shortlist],
+            "advisory_only": True,
+        }
+        serialized = json.dumps(payload)
+        self.storage.set("local_screener_last_result", serialized)
+        self.storage.set("local_screener_last_at", current.astimezone(UTC).isoformat())
+        self.storage.set("local_screener_last_error", "")
+        self.storage.add_event("local_screener_result", serialized)
+        return payload
+
     async def _bootstrap_candidate_history(
         self,
         symbols: list[str],
@@ -255,6 +305,10 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
         active_symbols = {watch.symbol for watch in self.storage.active_watches(current)}
         review_symbols = sorted(active_symbols | set(self.settings.etoro.review_symbols))
         stream_context, dynamic_symbols = await self._stream_context(current)
+        stream_context["local_screener"] = await self._local_screener_context(
+            stream_context,
+            current,
+        )
         await self._bootstrap_candidate_history(dynamic_symbols, current)
         review_symbols = sorted(set(review_symbols) | set(dynamic_symbols))
 
