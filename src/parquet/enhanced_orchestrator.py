@@ -166,41 +166,69 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
         config = self.settings.local_screener
         if self.local_screener is None:
             return {"enabled": False, "status": "disabled", "model": config.model}
+
         raw_candidates = stream_context.get("candidates")
-        if not isinstance(raw_candidates, list):
-            return {"enabled": True, "status": "no_candidates", "model": config.model}
-        candidates = [item for item in raw_candidates if isinstance(item, dict)]
+        candidates = (
+            [item for item in raw_candidates if isinstance(item, dict)]
+            if isinstance(raw_candidates, list)
+            else []
+        )
         if not candidates:
-            return {"enabled": True, "status": "no_candidates", "model": config.model}
+            payload: dict[str, object] = {
+                "enabled": True,
+                "status": "no_candidates",
+                "model": config.model,
+                "evaluated_candidates": 0,
+                "latency_ms": 0.0,
+                "telemetry": {},
+                "shortlist": [],
+                "advisory_only": True,
+            }
+            self._persist_local_screener_payload(payload, current)
+            return payload
+
         try:
             result, elapsed = await self.local_screener.screen(candidates)
         except Exception as exc:
             error = repr(exc)[:1000]
-            self.storage.set("local_screener_last_error", error)
-            self.storage.set("local_screener_last_error_at", current.astimezone(UTC).isoformat())
-            self.storage.add_event("local_screener_error", json.dumps({"error": error}))
-            return {
+            payload = {
                 "enabled": True,
                 "status": "error",
                 "model": config.model,
+                "evaluated_candidates": min(len(candidates), config.input_candidates),
                 "error": error,
+                "advisory_only": True,
             }
+            self.storage.set("local_screener_last_error", error)
+            self.storage.set("local_screener_last_error_at", current.astimezone(UTC).isoformat())
+            self.storage.set("local_screener_last_result", json.dumps(payload))
+            self.storage.set("local_screener_last_at", current.astimezone(UTC).isoformat())
+            self.storage.add_event("local_screener_error", json.dumps(payload))
+            return payload
 
-        payload: dict[str, object] = {
+        payload = {
             "enabled": True,
             "status": "ok",
             "model": config.model,
             "evaluated_candidates": min(len(candidates), config.input_candidates),
             "latency_ms": round(elapsed * 1000.0, 1),
+            "telemetry": self.local_screener.last_telemetry,
             "shortlist": [item.model_dump(mode="json") for item in result.shortlist],
             "advisory_only": True,
         }
+        self._persist_local_screener_payload(payload, current)
+        return payload
+
+    def _persist_local_screener_payload(
+        self,
+        payload: dict[str, object],
+        current: datetime,
+    ) -> None:
         serialized = json.dumps(payload)
         self.storage.set("local_screener_last_result", serialized)
         self.storage.set("local_screener_last_at", current.astimezone(UTC).isoformat())
         self.storage.set("local_screener_last_error", "")
         self.storage.add_event("local_screener_result", serialized)
-        return payload
 
     async def _bootstrap_candidate_history(
         self,
