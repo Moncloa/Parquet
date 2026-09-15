@@ -77,14 +77,45 @@ async def test_local_screener_is_batched_structured_and_non_thinking() -> None:
     assert '"points"' not in prompt
     assert '"deterministic_rank_score"' in prompt
     assert "independent advisory confidence" in prompt
+    assert "below 0.30 is low" in prompt
     assert captured["options"]["num_predict"] == 128
     assert client.last_telemetry == {
+        "eligible_candidates": 10,
+        "min_deterministic_score": 0.05,
         "load_ms": 5.0,
         "prompt_tokens": 200,
         "prompt_ms": 2000.0,
         "eval_tokens": 60,
         "eval_ms": 10000.0,
         "eval_tokens_per_second": 6.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_screener_skips_candidates_below_deterministic_cutoff() -> None:
+    called = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(500)
+
+    weak = _candidates(3)
+    for item in weak:
+        item["score"] = 0.0
+
+    client = LocalScreenerClient(
+        LocalScreenerConfig(min_deterministic_score=0.05),
+        transport=httpx.MockTransport(handler),
+    )
+    result, elapsed = await client.screen(weak)
+
+    assert result.shortlist == []
+    assert elapsed == 0.0
+    assert called is False
+    assert client.last_telemetry == {
+        "eligible_candidates": 0,
+        "min_deterministic_score": 0.05,
     }
 
 
