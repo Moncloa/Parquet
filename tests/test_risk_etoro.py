@@ -11,7 +11,6 @@ from parquet.risk_etoro import EtoroRiskReader
 from parquet.risk_ledger import LocalEquityRiskLedger
 from parquet.storage import Storage
 
-
 NOW = datetime(2026, 9, 16, 6, 45, tzinfo=UTC)
 DAY_START = datetime(2026, 9, 16, 0, 0, tzinfo=UTC)
 WEEK_START = datetime(2026, 9, 14, 0, 0, tzinfo=UTC)
