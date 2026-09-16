@@ -48,9 +48,9 @@ class EtoroRiskReader:
     """Rebuild daily/weekly risk counters from broker source-of-truth data.
 
     Trade history supplies realized P&L and opening timestamps for closed trades.
-    The real P&L endpoint supplies currently open positions. If an open position
-    predates the requested risk period, its period-only P&L cannot be recovered
-    from the current snapshot, so reconstruction deliberately fails closed.
+    The real P&L endpoint supplies currently open positions. If a position spans a
+    risk-period boundary, its period-only P&L cannot be recovered from these
+    snapshots, so reconstruction deliberately fails closed.
     """
 
     def __init__(self, client: EtoroMarketDataClient) -> None:
@@ -89,6 +89,18 @@ class EtoroRiskReader:
                 raise ValueError(
                     "cannot reconstruct weekly P&L exactly: open position "
                     f"{position.position_id} predates week start"
+                )
+
+        for trade in closed_trades:
+            if trade.close_timestamp >= day_start and trade.open_timestamp < day_start:
+                raise ValueError(
+                    "cannot reconstruct daily P&L exactly: closed trade "
+                    f"{trade.position_id} spans day start"
+                )
+            if trade.close_timestamp >= week_start and trade.open_timestamp < week_start:
+                raise ValueError(
+                    "cannot reconstruct weekly P&L exactly: closed trade "
+                    f"{trade.position_id} spans week start"
                 )
 
         daily_trade_ids = {
