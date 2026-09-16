@@ -11,6 +11,7 @@ from parquet.models import RiskSnapshot
 from parquet.orchestrator import Orchestrator
 from parquet.portfolio import PositionManager
 from parquet.portfolio_etoro import EtoroPortfolioReader
+from parquet.risk_etoro import EtoroRiskReader
 from parquet.storage import Storage
 
 
@@ -28,6 +29,7 @@ class ReconciliationService:
         self.position_manager = PositionManager(storage)
         self.market_client = market_client
         self.reader = EtoroPortfolioReader(market_client) if market_client is not None else None
+        self.risk_reader = EtoroRiskReader(market_client) if market_client is not None else None
         self._last_poll_at: datetime | None = None
         self._reverse_ids = {
             instrument_id: symbol.upper()
@@ -117,7 +119,7 @@ class ReconciliationService:
         *,
         force: bool = False,
     ) -> int:
-        if self.reader is None:
+        if self.reader is None or self.risk_reader is None:
             return 0
         current = (now or datetime.now(UTC)).astimezone(UTC)
         if (
@@ -150,24 +152,51 @@ class ReconciliationService:
             )
             return 0
 
+        try:
+            broker_risk = await self.risk_reader.snapshot(
+                snapshot,
+                now=current,
+                timezone=self.settings.schedule.timezone,
+            )
+        except Exception as exc:
+            error = f"broker risk reconstruction failed: {exc}"
+            report = self.position_manager.record_error(error, now=current)
+            self.storage.set("broker_risk_last_error", error)
+            self.storage.set("broker_risk_last_error_at", current.isoformat())
+            self.storage.add_event(
+                "risk_reconstruction_error",
+                json.dumps(
+                    {
+                        "as_of": current.isoformat(),
+                        "state": report.state.value,
+                        "error": repr(exc),
+                    }
+                ),
+            )
+            return 0
+
         open_symbols = set(snapshot.open_symbols)
         for instrument_id in snapshot.open_instrument_ids:
             symbol = self._reverse_ids.get(instrument_id)
             if symbol is not None:
                 open_symbols.add(symbol)
 
-        previous = self.storage.get_risk_snapshot()
         risk_snapshot = RiskSnapshot(
             as_of=snapshot.captured_at,
             equity_usd=snapshot.equity_usd,
             open_positions=len(snapshot.positions),
-            trades_today=0 if previous is None else previous.trades_today,
-            daily_pnl_pct=0.0 if previous is None else previous.daily_pnl_pct,
-            weekly_pnl_pct=0.0 if previous is None else previous.weekly_pnl_pct,
+            trades_today=broker_risk.trades_today,
+            daily_pnl_pct=broker_risk.daily_pnl_pct,
+            weekly_pnl_pct=broker_risk.weekly_pnl_pct,
             open_symbols=sorted(open_symbols),
             open_instrument_ids=snapshot.open_instrument_ids,
         )
         self.storage.set_risk_snapshot(risk_snapshot)
+        self.storage.set("broker_risk_last_error", "")
+        self.storage.set(
+            "broker_risk_components",
+            json.dumps(broker_risk.model_dump(mode="json")),
+        )
         self.storage.set(
             "account_snapshot_components",
             json.dumps(
@@ -180,6 +209,10 @@ class ReconciliationService:
                     "open_positions": len(snapshot.positions),
                     "reconciliation_state": report.state.value,
                     "autonomous_trading_enabled": report.trading_enabled,
+                    "risk_source": "etoro_trade_history+real_pnl",
+                    "trades_today": broker_risk.trades_today,
+                    "daily_pnl_pct": broker_risk.daily_pnl_pct,
+                    "weekly_pnl_pct": broker_risk.weekly_pnl_pct,
                 }
             ),
         )
