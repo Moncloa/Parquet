@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -15,6 +16,9 @@ class EquityBoundaryBaseline(BaseModel):
     after_at: datetime
     before_gap_seconds: float = Field(ge=0)
     after_gap_seconds: float = Field(ge=0)
+    provenance: str = "local_bracket"
+    mode: str = "exact"
+    source: str | None = None
 
 
 class LocalEquityRiskLedger:
@@ -23,8 +27,13 @@ class LocalEquityRiskLedger:
     Historical eToro balance scope is not always available. This ledger records
     every broker reconciliation locally and establishes a period baseline only
     when Parquet has snapshots on both sides of the UTC boundary, both snapshots
-    are flat, and their equities agree to the cent. Otherwise it fails closed.
+    are flat, and their equities agree to the cent. A manual baseline may be
+    seeded explicitly for bootstrap/recovery, but it is stored separately and
+    returned with provenance so it can never masquerade as an observed snapshot.
     """
+
+    _MANUAL_MODES = {"exact", "conservative_upper_bound"}
+    _MANUAL_PERIODS = {"daily", "weekly"}
 
     def __init__(self, storage: Any, *, boundary_tolerance_seconds: float = 120.0) -> None:
         self.storage = storage
@@ -39,6 +48,16 @@ class LocalEquityRiskLedger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_risk_equity_snapshots_captured_at
                 ON risk_equity_snapshots(captured_at);
+
+                CREATE TABLE IF NOT EXISTS risk_manual_baselines (
+                    period TEXT NOT NULL,
+                    boundary TEXT NOT NULL,
+                    equity_usd REAL NOT NULL,
+                    mode TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(period, boundary)
+                );
                 """
             )
             self.storage.conn.commit()
@@ -62,8 +81,74 @@ class LocalEquityRiskLedger:
             )
             self.storage.conn.commit()
 
+    def seed_manual_baseline(
+        self,
+        *,
+        period: str,
+        boundary: datetime,
+        equity_usd: float,
+        mode: str,
+        source: str,
+        created_at: datetime | None = None,
+    ) -> EquityBoundaryBaseline:
+        normalized_period = period.strip().lower()
+        normalized_mode = mode.strip().lower().replace("-", "_")
+        normalized_source = source.strip()
+        if normalized_period not in self._MANUAL_PERIODS:
+            raise ValueError("manual baseline period must be daily or weekly")
+        if normalized_mode not in self._MANUAL_MODES:
+            raise ValueError(
+                "manual baseline mode must be exact or conservative_upper_bound"
+            )
+        if equity_usd <= 0:
+            raise ValueError("manual baseline equity must be positive")
+        if not normalized_source:
+            raise ValueError("manual baseline source must not be empty")
+
+        boundary_utc = boundary.astimezone(UTC)
+        created_utc = (created_at or datetime.now(UTC)).astimezone(UTC)
+        with self.storage._lock:
+            self.storage.conn.execute(
+                "INSERT OR REPLACE INTO risk_manual_baselines"
+                "(period, boundary, equity_usd, mode, source, created_at) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (
+                    normalized_period,
+                    boundary_utc.isoformat(),
+                    float(equity_usd),
+                    normalized_mode,
+                    normalized_source,
+                    created_utc.isoformat(),
+                ),
+            )
+            self.storage.conn.commit()
+
+        if hasattr(self.storage, "add_event"):
+            self.storage.add_event(
+                "manual_risk_baseline_seeded",
+                json.dumps(
+                    {
+                        "period": normalized_period,
+                        "boundary": boundary_utc.isoformat(),
+                        "equity_usd": float(equity_usd),
+                        "mode": normalized_mode,
+                        "source": normalized_source,
+                        "created_at": created_utc.isoformat(),
+                    }
+                ),
+            )
+
+        return self._manual_baseline(
+            period=normalized_period,
+            boundary=boundary_utc,
+        )
+
     def baseline(self, boundary: datetime, *, label: str) -> EquityBoundaryBaseline:
         boundary_utc = boundary.astimezone(UTC)
+        manual = self._manual_baseline(period=label, boundary=boundary_utc, required=False)
+        if manual is not None:
+            return manual
+
         boundary_text = boundary_utc.isoformat()
         with self.storage._lock:
             before = self.storage.conn.execute(
@@ -124,4 +209,41 @@ class LocalEquityRiskLedger:
             after_at=after_at,
             before_gap_seconds=before_gap,
             after_gap_seconds=after_gap,
+        )
+
+    def _manual_baseline(
+        self,
+        *,
+        period: str,
+        boundary: datetime,
+        required: bool = True,
+    ) -> EquityBoundaryBaseline | None:
+        normalized_period = period.strip().lower()
+        boundary_utc = boundary.astimezone(UTC)
+        with self.storage._lock:
+            row = self.storage.conn.execute(
+                "SELECT equity_usd, mode, source FROM risk_manual_baselines "
+                "WHERE period = ? AND boundary = ?",
+                (normalized_period, boundary_utc.isoformat()),
+            ).fetchone()
+        if row is None:
+            if required:
+                raise ValueError(
+                    f"manual {normalized_period} equity baseline not found at "
+                    f"{boundary_utc.isoformat()}"
+                )
+            return None
+        equity = float(row[0])
+        if equity <= 0:
+            raise ValueError("stored manual baseline equity must be positive")
+        return EquityBoundaryBaseline(
+            boundary=boundary_utc,
+            equity_usd=equity,
+            before_at=boundary_utc,
+            after_at=boundary_utc,
+            before_gap_seconds=0.0,
+            after_gap_seconds=0.0,
+            provenance="manual",
+            mode=str(row[1]),
+            source=str(row[2]),
         )
