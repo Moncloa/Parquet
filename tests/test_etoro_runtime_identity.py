@@ -66,12 +66,19 @@ async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None
             return httpx.Response(200, json=_identity_response(123))
         if request.url.path == "/api/v1/trading/info/real/pnl":
             return httpx.Response(200, json=_portfolio_response())
+        if request.url.path == "/api/v1/trading/info/trade/history":
+            return httpx.Response(200, json=[])
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
     service, storage = _service(tmp_path, handler)
 
     assert await service.poll_once(force=True) == 1
-    assert paths[:2] == ["/api/v1/me", "/api/v1/trading/info/real/pnl"]
+    assert paths == [
+        "/api/v1/me",
+        "/api/v1/trading/info/real/pnl",
+        "/api/v1/trading/info/trade/history",
+        "/api/v1/trading/info/real/pnl",
+    ]
     assert storage.get("etoro_authenticated_gcid") == "123"
     assert storage.get("etoro_authenticated_real_cid") == "456"
     assert storage.get("etoro_authenticated_demo_cid") == "789"
@@ -84,10 +91,38 @@ async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None
         "etoro-public:trade.real:read",
         "etoro-public:trade.real:write",
     ]
+    risk = storage.get_risk_snapshot()
+    assert risk is not None
+    assert risk.trades_today == 0
+    assert risk.daily_pnl_pct == 0.0
+    assert risk.weekly_pnl_pct == 0.0
+    components = json.loads(storage.get("account_snapshot_components") or "{}")
+    assert components["risk_source"] == "etoro_trade_history+real_pnl"
     report = storage.get_reconciliation_report()
     assert report is not None
     assert report.state == ReconciliationState.SYNCED
     assert report.trading_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_risk_reconstruction_failure_blocks_trading(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/me":
+            return httpx.Response(200, json=_identity_response(123))
+        if request.url.path == "/api/v1/trading/info/real/pnl":
+            return httpx.Response(200, json=_portfolio_response())
+        if request.url.path == "/api/v1/trading/info/trade/history":
+            return httpx.Response(200, json={"unexpected": "shape"})
+        raise AssertionError(f"Unexpected path: {request.url.path}")
+
+    service, storage = _service(tmp_path, handler)
+
+    assert await service.poll_once(force=True) == 0
+    report = storage.get_reconciliation_report()
+    assert report is not None
+    assert report.state == ReconciliationState.ERROR
+    assert report.trading_enabled is False
+    assert "broker risk reconstruction failed" in (storage.get("broker_risk_last_error") or "")
 
 
 @pytest.mark.asyncio
