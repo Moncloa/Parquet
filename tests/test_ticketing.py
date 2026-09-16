@@ -16,6 +16,8 @@ from parquet.execution.etoro import (
 from parquet.live_test import run_live_test
 from parquet.market.etoro import InstrumentRate, InstrumentSearchHit
 from parquet.models import Side, TradeProposal
+from parquet.portfolio import BrokerPortfolioSnapshot
+from parquet.risk_ledger import LocalEquityRiskLedger
 from parquet.storage import Storage
 from parquet.tickets import (
     choose_leverage_terms,
@@ -72,6 +74,25 @@ def _ger40_eligibility() -> EtoroEligibilityResult:
         ),
         response={},
     )
+
+
+def _seed_local_risk_boundaries(storage: Storage, now: datetime, equity: float) -> None:
+    ledger = LocalEquityRiskLedger(storage)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = day_start - timedelta(days=day_start.weekday())
+    for boundary in {day_start, week_start}:
+        for at in (boundary - timedelta(seconds=30), boundary + timedelta(seconds=30)):
+            ledger.record(
+                BrokerPortfolioSnapshot(
+                    captured_at=at,
+                    equity_usd=equity,
+                    available_cash_usd=equity,
+                    invested_usd=0.0,
+                    unrealized_pnl_usd=0.0,
+                    credit_usd=equity,
+                    positions=[],
+                )
+            )
 
 
 def test_choose_real_small_amount_defaults_to_broker_minimum() -> None:
@@ -238,28 +259,6 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
                 }
             if path == "/trading/info/trade/history":
                 return []
-            if path == "/balances/history":
-                from_date = params["fromDate"]
-                to_date = params["toDate"]
-                dates = [from_date] if from_date == to_date else [from_date, to_date]
-                return {
-                    "displayCurrency": "USD",
-                    "fromDate": from_date,
-                    "toDate": to_date,
-                    "snapshots": [
-                        {
-                            "date": value,
-                            "displayTotalBalance": 10_000.0,
-                            "accountSnapshots": [
-                                {
-                                    "accountType": "trading",
-                                    "displayTotal": 10_000.0,
-                                }
-                            ],
-                        }
-                        for value in dates
-                    ],
-                }
             raise AssertionError(path)
 
         async def search(self, query: str):
@@ -324,7 +323,9 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
         generated_at=now,
         expires_at=now + timedelta(minutes=10),
     )
-    Storage(settings.state_db).save_proposal("analysis-1", proposal)
+    storage = Storage(settings.state_db)
+    storage.save_proposal("analysis-1", proposal)
+    _seed_local_risk_boundaries(storage, now, 10_000.0)
 
     ticket = await prepare_real_small_ticket(settings, proposal_id="proposal-1")
 
