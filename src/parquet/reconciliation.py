@@ -156,7 +156,6 @@ class ReconciliationService:
             broker_risk = await self.risk_reader.snapshot(
                 snapshot,
                 now=current,
-                timezone=self.settings.schedule.timezone,
             )
         except Exception as exc:
             error = f"broker risk reconstruction failed: {exc}"
@@ -209,7 +208,8 @@ class ReconciliationService:
                     "open_positions": len(snapshot.positions),
                     "reconciliation_state": report.state.value,
                     "autonomous_trading_enabled": report.trading_enabled,
-                    "risk_source": "etoro_trade_history+real_pnl",
+                    "risk_source": "etoro_trade_history+historical_balances+real_pnl",
+                    "risk_timezone": broker_risk.timezone,
                     "trades_today": broker_risk.trades_today,
                     "daily_pnl_pct": broker_risk.daily_pnl_pct,
                     "weekly_pnl_pct": broker_risk.weekly_pnl_pct,
