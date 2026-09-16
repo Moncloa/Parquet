@@ -236,6 +236,8 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
                         "ordersForOpen": [],
                     }
                 }
+            if path == "/trading/info/trade/history":
+                return []
             raise AssertionError(path)
 
         async def search(self, query: str):
