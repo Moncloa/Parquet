@@ -45,7 +45,7 @@ def test_manual_baseline_is_auditable_and_preferred(tmp_path) -> None:
     assert result.mode == "exact"
     assert result.source == "operator:flat account; no trades since boundary"
     event = storage.conn.execute(
-        "SELECT event_type, payload FROM events ORDER BY rowid DESC LIMIT 1"
+        "SELECT kind, payload FROM events ORDER BY id DESC LIMIT 1"
     ).fetchone()
     assert event is not None
     assert event[0] == "manual_risk_baseline_seeded"
