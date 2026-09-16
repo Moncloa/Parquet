@@ -7,8 +7,8 @@ import pytest
 
 from parquet.market.etoro import EtoroMarketDataClient
 from parquet.portfolio import BrokerPortfolioSnapshot, BrokerPosition
-from parquet.risk_etoro import EtoroRiskReader
 from parquet.risk_ledger import LocalEquityRiskLedger
+from parquet.risk_etoro import EtoroRiskReader
 from parquet.storage import Storage
 
 
