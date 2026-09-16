@@ -25,6 +25,30 @@ def _portfolio_response() -> dict[str, object]:
     }
 
 
+def _balance_history_response(request: httpx.Request, *, equity: float = 1000.0) -> dict[str, object]:
+    from_date = request.url.params["fromDate"]
+    to_date = request.url.params["toDate"]
+    dates = [from_date] if from_date == to_date else [from_date, to_date]
+    return {
+        "displayCurrency": "USD",
+        "fromDate": from_date,
+        "toDate": to_date,
+        "snapshots": [
+            {
+                "date": value,
+                "displayTotalBalance": equity,
+                "accountSnapshots": [
+                    {
+                        "accountType": "trading",
+                        "displayTotal": equity,
+                    }
+                ],
+            }
+            for value in dates
+        ],
+    }
+
+
 def _identity_response(gcid: int, *, scopes: list[str] | None = None) -> dict[str, object]:
     return {
         "gcid": gcid,
@@ -68,6 +92,8 @@ async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None
             return httpx.Response(200, json=_portfolio_response())
         if request.url.path == "/api/v1/trading/info/trade/history":
             return httpx.Response(200, json=[])
+        if request.url.path == "/api/v1/balances/history":
+            return httpx.Response(200, json=_balance_history_response(request))
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
     service, storage = _service(tmp_path, handler)
@@ -78,6 +104,7 @@ async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None
         "/api/v1/trading/info/real/pnl",
         "/api/v1/trading/info/trade/history",
         "/api/v1/trading/info/real/pnl",
+        "/api/v1/balances/history",
     ]
     assert storage.get("etoro_authenticated_gcid") == "123"
     assert storage.get("etoro_authenticated_real_cid") == "456"
@@ -97,7 +124,8 @@ async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None
     assert risk.daily_pnl_pct == 0.0
     assert risk.weekly_pnl_pct == 0.0
     components = json.loads(storage.get("account_snapshot_components") or "{}")
-    assert components["risk_source"] == "etoro_trade_history+real_pnl"
+    assert components["risk_source"] == "etoro_trade_history+historical_balances+real_pnl"
+    assert components["risk_timezone"] == "UTC"
     report = storage.get_reconciliation_report()
     assert report is not None
     assert report.state == ReconciliationState.SYNCED
