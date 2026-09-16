@@ -138,10 +138,13 @@ class LocalEquityRiskLedger:
                 ),
             )
 
-        return self._manual_baseline(
+        baseline = self._manual_baseline(
             period=normalized_period,
             boundary=boundary_utc,
         )
+        if baseline is None:
+            raise RuntimeError("manual risk baseline disappeared after persistence")
+        return baseline
 
     def baseline(self, boundary: datetime, *, label: str) -> EquityBoundaryBaseline:
         boundary_utc = boundary.astimezone(UTC)
