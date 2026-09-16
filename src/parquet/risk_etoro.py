@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from parquet.market.etoro import EtoroApiError, EtoroMarketDataClient
+from parquet.market.etoro import EtoroMarketDataClient
 from parquet.portfolio import BrokerPortfolioSnapshot
+from parquet.risk_ledger import EquityBoundaryBaseline, LocalEquityRiskLedger
 
 _HISTORY_PAGE_SIZE = 100
 _HISTORY_MAX_PAGES = 10
@@ -36,27 +37,38 @@ class BrokerRiskMetrics(BaseModel):
     weekly_pnl_usd: float
     daily_pnl_pct: float
     weekly_pnl_pct: float
-    daily_baseline_date: date
-    weekly_baseline_date: date
+    daily_baseline: EquityBoundaryBaseline
+    weekly_baseline: EquityBoundaryBaseline
     history_rows: int = Field(ge=0)
     open_position_rows: int = Field(ge=0)
+    source: str = "etoro_trade_history+local_equity_ledger+real_pnl"
 
 
 class EtoroRiskReader:
-    """Rebuild broker-native daily/weekly risk counters.
+    """Rebuild risk counters from live broker data plus a durable local equity ledger.
 
-    eToro historical balances are end-of-day snapshots keyed by UTC date. Risk
-    accounting therefore uses UTC day/week boundaries so the baseline and the
-    counting window refer to the same broker-native period.
-
-    Trade history is used only to count unique positions opened today. Daily and
-    weekly P&L are derived from current real-account equity versus the exact EOD
-    balance immediately preceding the respective period. This remains correct for
-    positions that were opened before the period and later closed or remain open.
+    eToro trading scopes provide current real equity/PnL and trade history, but a
+    separate balance scope may be unavailable. Parquet therefore records its own
+    broker-equity snapshots. Daily/weekly baselines are accepted only when local
+    snapshots bracket the UTC boundary closely, the portfolio is flat on both
+    sides, and equity is unchanged to the cent. Any ambiguity fails closed.
     """
 
-    def __init__(self, client: EtoroMarketDataClient) -> None:
+    def __init__(
+        self,
+        client: EtoroMarketDataClient,
+        storage: Any,
+        *,
+        boundary_tolerance_seconds: float = 120.0,
+    ) -> None:
         self.client = client
+        self.ledger = LocalEquityRiskLedger(
+            storage,
+            boundary_tolerance_seconds=boundary_tolerance_seconds,
+        )
+
+    def record_equity(self, broker_snapshot: BrokerPortfolioSnapshot) -> None:
+        self.ledger.record(broker_snapshot)
 
     async def snapshot(
         self,
@@ -67,27 +79,13 @@ class EtoroRiskReader:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = day_start - timedelta(days=day_start.weekday())
-        daily_baseline_date = day_start.date() - timedelta(days=1)
-        weekly_baseline_date = week_start.date() - timedelta(days=1)
 
         history = await self._trades_since(day_start)
         open_positions = await self._open_positions()
         self._assert_same_open_positions(broker_snapshot, open_positions)
-        balances = await self._historical_balances(
-            weekly_baseline_date,
-            daily_baseline_date,
-        )
 
-        daily_start_equity = _required_baseline(
-            balances,
-            daily_baseline_date,
-            "daily",
-        )
-        weekly_start_equity = _required_baseline(
-            balances,
-            weekly_baseline_date,
-            "weekly",
-        )
+        daily_baseline = self.ledger.baseline(day_start, label="daily")
+        weekly_baseline = self.ledger.baseline(week_start, label="weekly")
 
         daily_trade_ids = {
             trade.position_id for trade in history if trade.open_timestamp >= day_start
@@ -102,8 +100,8 @@ class EtoroRiskReader:
         if current_equity <= 0:
             raise ValueError("current broker equity must be positive")
 
-        daily_pnl = current_equity - daily_start_equity
-        weekly_pnl = current_equity - weekly_start_equity
+        daily_pnl = current_equity - daily_baseline.equity_usd
+        weekly_pnl = current_equity - weekly_baseline.equity_usd
 
         return BrokerRiskMetrics(
             as_of=current,
@@ -111,14 +109,18 @@ class EtoroRiskReader:
             week_start=week_start,
             trades_today=len(daily_trade_ids),
             current_equity_usd=current_equity,
-            daily_start_equity_usd=daily_start_equity,
-            weekly_start_equity_usd=weekly_start_equity,
+            daily_start_equity_usd=daily_baseline.equity_usd,
+            weekly_start_equity_usd=weekly_baseline.equity_usd,
             daily_pnl_usd=daily_pnl,
             weekly_pnl_usd=weekly_pnl,
-            daily_pnl_pct=_return_pct(daily_pnl, daily_start_equity, label="daily"),
-            weekly_pnl_pct=_return_pct(weekly_pnl, weekly_start_equity, label="weekly"),
-            daily_baseline_date=daily_baseline_date,
-            weekly_baseline_date=weekly_baseline_date,
+            daily_pnl_pct=_return_pct(daily_pnl, daily_baseline.equity_usd, label="daily"),
+            weekly_pnl_pct=_return_pct(
+                weekly_pnl,
+                weekly_baseline.equity_usd,
+                label="weekly",
+            ),
+            daily_baseline=daily_baseline,
+            weekly_baseline=weekly_baseline,
             history_rows=len(history),
             open_position_rows=len(open_positions),
         )
@@ -178,47 +180,6 @@ class EtoroRiskReader:
             )
         return result
 
-    async def _historical_balances(
-        self,
-        from_date: date,
-        to_date: date,
-    ) -> dict[date, float]:
-        try:
-            body = await self.client._get(
-                "/balances/history",
-                params={
-                    "displayCurrency": "USD",
-                    "fromDate": from_date.isoformat(),
-                    "toDate": to_date.isoformat(),
-                    "accountTypes": "Trading",
-                },
-            )
-        except EtoroApiError as exc:
-            if exc.status_code == 403:
-                raise ValueError(
-                    "historical balances are forbidden; eToro credentials may need "
-                    "the etoro-public:money.balance:read scope"
-                ) from exc
-            raise
-
-        snapshots, display_currency = _balance_snapshots(body)
-        if display_currency is not None and display_currency.upper() != "USD":
-            raise ValueError(
-                f"historical balances returned unexpected display currency {display_currency}"
-            )
-
-        result: dict[date, float] = {}
-        for snapshot in snapshots:
-            snapshot_date = _parse_date(snapshot.get("date"), "historical balance date")
-            equity = _historical_trading_equity(snapshot)
-            existing = result.get(snapshot_date)
-            if existing is not None and abs(existing - equity) > 1e-9:
-                raise ValueError(
-                    f"conflicting historical balance snapshots for {snapshot_date.isoformat()}"
-                )
-            result[snapshot_date] = equity
-        return result
-
     @staticmethod
     def _assert_same_open_positions(
         broker_snapshot: BrokerPortfolioSnapshot,
@@ -262,62 +223,6 @@ def _parse_historical_trade(item: dict[str, Any]) -> HistoricalTrade:
     )
 
 
-def _balance_snapshots(body: Any) -> tuple[list[dict[str, Any]], str | None]:
-    if not isinstance(body, dict):
-        raise ValueError("eToro historical balances response must be an object")
-    candidate: Any = body
-    data = body.get("data")
-    if isinstance(data, dict):
-        candidate = data
-    snapshots = candidate.get("snapshots") if isinstance(candidate, dict) else None
-    if snapshots is None:
-        raise ValueError("eToro historical balances response is missing snapshots")
-    if not isinstance(snapshots, list) or not all(isinstance(item, dict) for item in snapshots):
-        raise ValueError("eToro historical balances snapshots must be a list of objects")
-    display_currency = candidate.get("displayCurrency") if isinstance(candidate, dict) else None
-    return list(snapshots), None if display_currency is None else str(display_currency)
-
-
-def _historical_trading_equity(snapshot: dict[str, Any]) -> float:
-    accounts = snapshot.get("accountSnapshots")
-    if isinstance(accounts, list) and accounts:
-        if not all(isinstance(item, dict) for item in accounts):
-            raise ValueError("historical balance accountSnapshots contains a non-object item")
-        trading = [
-            item
-            for item in accounts
-            if str(item.get("accountType", "")).strip().lower() == "trading"
-        ]
-        if len(trading) != 1:
-            raise ValueError(
-                "historical balance must contain exactly one trading account snapshot"
-            )
-        return _positive_float(
-            _first(trading[0], "displayTotal", "total"),
-            "historical trading account equity",
-        )
-
-    return _positive_float(
-        _first(snapshot, "displayTotalBalance", "totalBalance"),
-        "historical trading equity",
-    )
-
-
-def _required_baseline(
-    balances: dict[date, float],
-    baseline_date: date,
-    label: str,
-) -> float:
-    value = balances.get(baseline_date)
-    if value is None:
-        raise ValueError(
-            f"missing exact {label} EOD balance for {baseline_date.isoformat()}"
-        )
-    if value <= 0:
-        raise ValueError(f"{label} starting equity must be positive")
-    return value
-
-
 def _client_portfolio(body: Any) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise ValueError("eToro PnL response must be an object")
@@ -351,15 +256,6 @@ def _parse_timestamp(value: Any, label: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _parse_date(value: Any, label: str) -> date:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"invalid {label}")
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"invalid {label}: {value}") from exc
-
-
 def _return_pct(pnl_usd: float, start_equity_usd: float, *, label: str) -> float:
     if start_equity_usd <= 0:
         raise ValueError(f"cannot derive {label} return from non-positive starting equity")
@@ -372,15 +268,3 @@ def _first(item: dict[str, Any], *keys: str) -> Any:
         if value is not None:
             return value
     return None
-
-
-def _positive_float(value: Any, label: str) -> float:
-    if isinstance(value, bool) or value is None:
-        raise ValueError(f"missing numeric {label}")
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"invalid numeric {label}") from exc
-    if parsed <= 0:
-        raise ValueError(f"{label} must be positive")
-    return parsed

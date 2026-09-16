@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 
 from parquet.config import EtoroConfig, Settings
 from parquet.market.etoro import EtoroMarketDataClient
-from parquet.portfolio import ReconciliationState
+from parquet.portfolio import BrokerPortfolioSnapshot, ReconciliationState
 from parquet.reconciliation import ReconciliationService
 from parquet.storage import Storage
 
@@ -22,30 +23,6 @@ def _portfolio_response() -> dict[str, object]:
             "ordersForOpen": [],
             "unrealizedPnL": 0.0,
         }
-    }
-
-
-def _balance_history_response(request: httpx.Request, *, equity: float = 1000.0) -> dict[str, object]:
-    from_date = request.url.params["fromDate"]
-    to_date = request.url.params["toDate"]
-    dates = [from_date] if from_date == to_date else [from_date, to_date]
-    return {
-        "displayCurrency": "USD",
-        "fromDate": from_date,
-        "toDate": to_date,
-        "snapshots": [
-            {
-                "date": value,
-                "displayTotalBalance": equity,
-                "accountSnapshots": [
-                    {
-                        "accountType": "trading",
-                        "displayTotal": equity,
-                    }
-                ],
-            }
-            for value in dates
-        ],
     }
 
 
@@ -80,6 +57,27 @@ def _service(tmp_path, handler, *, expected_gcid: int = 123):
     return ReconciliationService(settings, storage, client), storage
 
 
+def _flat_snapshot(at: datetime, *, equity: float = 1000.0) -> BrokerPortfolioSnapshot:
+    return BrokerPortfolioSnapshot(
+        captured_at=at,
+        equity_usd=equity,
+        available_cash_usd=equity,
+        invested_usd=0.0,
+        unrealized_pnl_usd=0.0,
+        credit_usd=equity,
+        positions=[],
+    )
+
+
+def _seed_boundaries(service: ReconciliationService, now: datetime) -> None:
+    assert service.risk_reader is not None
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = day_start - timedelta(days=day_start.weekday())
+    for boundary in {day_start, week_start}:
+        service.risk_reader.record_equity(_flat_snapshot(boundary - timedelta(seconds=30)))
+        service.risk_reader.record_equity(_flat_snapshot(boundary + timedelta(seconds=30)))
+
+
 @pytest.mark.asyncio
 async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None:
     paths: list[str] = []
@@ -92,19 +90,18 @@ async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None
             return httpx.Response(200, json=_portfolio_response())
         if request.url.path == "/api/v1/trading/info/trade/history":
             return httpx.Response(200, json=[])
-        if request.url.path == "/api/v1/balances/history":
-            return httpx.Response(200, json=_balance_history_response(request))
         raise AssertionError(f"Unexpected path: {request.url.path}")
 
     service, storage = _service(tmp_path, handler)
+    now = datetime.now(UTC)
+    _seed_boundaries(service, now)
 
-    assert await service.poll_once(force=True) == 1
+    assert await service.poll_once(now=now, force=True) == 1
     assert paths == [
         "/api/v1/me",
         "/api/v1/trading/info/real/pnl",
         "/api/v1/trading/info/trade/history",
         "/api/v1/trading/info/real/pnl",
-        "/api/v1/balances/history",
     ]
     assert storage.get("etoro_authenticated_gcid") == "123"
     assert storage.get("etoro_authenticated_real_cid") == "456"
@@ -124,7 +121,7 @@ async def test_reconciliation_persists_verified_agent_identity(tmp_path) -> None
     assert risk.daily_pnl_pct == 0.0
     assert risk.weekly_pnl_pct == 0.0
     components = json.loads(storage.get("account_snapshot_components") or "{}")
-    assert components["risk_source"] == "etoro_trade_history+historical_balances+real_pnl"
+    assert components["risk_source"] == "etoro_trade_history+local_equity_ledger+real_pnl"
     assert components["risk_timezone"] == "UTC"
     report = storage.get_reconciliation_report()
     assert report is not None

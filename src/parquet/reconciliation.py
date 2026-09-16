@@ -29,7 +29,18 @@ class ReconciliationService:
         self.position_manager = PositionManager(storage)
         self.market_client = market_client
         self.reader = EtoroPortfolioReader(market_client) if market_client is not None else None
-        self.risk_reader = EtoroRiskReader(market_client) if market_client is not None else None
+        self.risk_reader = (
+            EtoroRiskReader(
+                market_client,
+                storage,
+                boundary_tolerance_seconds=max(
+                    120.0,
+                    float(settings.etoro.account_poll_seconds) * 2.0,
+                ),
+            )
+            if market_client is not None
+            else None
+        )
         self._last_poll_at: datetime | None = None
         self._reverse_ids = {
             instrument_id: symbol.upper()
@@ -138,6 +149,7 @@ class ReconciliationService:
             snapshot = await self.reader.snapshot(now=current)
             if snapshot.equity_usd <= 0:
                 raise ValueError("eToro equity must be positive for execution sizing")
+            self.risk_reader.record_equity(snapshot)
             report = self.position_manager.reconcile(snapshot)
         except Exception as exc:
             report = self.position_manager.record_error(exc, now=current)
@@ -208,7 +220,7 @@ class ReconciliationService:
                     "open_positions": len(snapshot.positions),
                     "reconciliation_state": report.state.value,
                     "autonomous_trading_enabled": report.trading_enabled,
-                    "risk_source": "etoro_trade_history+historical_balances+real_pnl",
+                    "risk_source": broker_risk.source,
                     "risk_timezone": broker_risk.timezone,
                     "trades_today": broker_risk.trades_today,
                     "daily_pnl_pct": broker_risk.daily_pnl_pct,
