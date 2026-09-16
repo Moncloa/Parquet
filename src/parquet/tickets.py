@@ -192,11 +192,14 @@ async def prepare_real_small_ticket(
     *,
     proposal_id: str,
     requested_amount_usd: float | None = None,
+    supervised_cap_override_usd: float | None = None,
 ) -> PreparedRealSmallTicket:
     if not settings.etoro.enabled:
         raise RuntimeError("eToro is disabled")
     if settings.etoro.expected_gcid is None:
         raise RuntimeError("Cannot prepare real ticket: Agent Portfolio GCID is not pinned")
+    if supervised_cap_override_usd is not None and supervised_cap_override_usd <= 0:
+        raise RuntimeError("Supervised cap override must be positive")
 
     orchestrator = AutonomousOrchestrator(settings)
     reconciliation = ReconciliationService(
@@ -243,12 +246,17 @@ async def prepare_real_small_ticket(
         raise RuntimeError(f"eToro does not allow opening instrument {instrument_id}")
 
     direction = "LONG" if proposal.side == Side.BUY else "SHORT"
+    supervised_cap = (
+        settings.execution.supervised_real_max_amount_usd
+        if supervised_cap_override_usd is None
+        else supervised_cap_override_usd
+    )
     leverage, settlement_type, broker_minimum, chosen_amount, maximum_safe = (
         choose_leverage_terms(
             eligibility,
             direction=direction,
             gate_maximum_notional_usd=decision.amount_usd,
-            supervised_cap_usd=settings.execution.supervised_real_max_amount_usd,
+            supervised_cap_usd=supervised_cap,
             max_leverage=settings.execution.supervised_real_max_leverage,
             requested_amount_usd=requested_amount_usd,
         )
