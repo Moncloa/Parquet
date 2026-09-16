@@ -238,6 +238,28 @@ async def test_prepare_real_small_uses_fresh_gate_and_broker_minimum(
                 }
             if path == "/trading/info/trade/history":
                 return []
+            if path == "/balances/history":
+                from_date = params["fromDate"]
+                to_date = params["toDate"]
+                dates = [from_date] if from_date == to_date else [from_date, to_date]
+                return {
+                    "displayCurrency": "USD",
+                    "fromDate": from_date,
+                    "toDate": to_date,
+                    "snapshots": [
+                        {
+                            "date": value,
+                            "displayTotalBalance": 10_000.0,
+                            "accountSnapshots": [
+                                {
+                                    "accountType": "trading",
+                                    "displayTotal": 10_000.0,
+                                }
+                            ],
+                        }
+                        for value in dates
+                    ],
+                }
             raise AssertionError(path)
 
         async def search(self, query: str):
