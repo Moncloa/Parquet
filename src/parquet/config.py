@@ -92,8 +92,8 @@ class StrategyConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_strategy(self) -> StrategyConfig:
-        if self.provider != "codex_cli":
-            raise ValueError("strategy.provider must be codex_cli")
+        if self.provider not in {"codex_cli", "openai_api"}:
+            raise ValueError("strategy.provider must be codex_cli or openai_api")
         return self
 
 
