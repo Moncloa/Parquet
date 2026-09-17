@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from parquet import strategy_worker
 from parquet.models import ReviewRequest
 
@@ -52,12 +54,19 @@ Review request JSON:
 
 
 def main() -> None:
-    # Keep the isolated stdin worker and all of its security/validation behavior,
-    # replacing only the strategy policy prompt used for each analysis. The worker
-    # intentionally imports this private helper as a module global, so install the
-    # replacement through the module namespace without weakening static typing.
+    # Install the common opportunity-seeking policy first; both providers consume
+    # exactly the same prompt and their results pass through the same validation.
     strategy_worker.__dict__["_strategy_prompt"] = opportunity_strategy_prompt
-    strategy_worker.main()
+    provider = os.getenv("PARQUET_STRATEGY_PROVIDER", "codex_cli").strip().lower()
+    if provider == "codex_cli":
+        strategy_worker.main()
+        return
+    if provider == "openai_api":
+        from parquet.strategy_openai import main as openai_main
+
+        openai_main()
+        return
+    raise RuntimeError(f"Unsupported PARQUET_STRATEGY_PROVIDER: {provider}")
 
 
 if __name__ == "__main__":
