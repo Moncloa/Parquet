@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -88,7 +89,11 @@ class OpenAIStrategyWorker:
         from parquet import strategy_worker
 
         prompt_request = _compact_strategy_request(request)
-        prompt = strategy_worker._strategy_prompt(prompt_request)
+        prompt_builder = cast(
+            Callable[[ReviewRequest], str],
+            strategy_worker.__dict__["_strategy_prompt"],
+        )
+        prompt = prompt_builder(prompt_request)
         schema = MarketAnalysis.model_json_schema()
         payload: dict[str, Any] = {
             "model": self.settings.model,
