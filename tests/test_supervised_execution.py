@@ -265,6 +265,8 @@ def _filled_snapshot() -> BrokerPortfolioSnapshot:
                 side="buy",
                 amount_usd=10.0,
                 leverage=2,
+                stop_loss_rate=29_400.0,
+                take_profit_rate=29_600.0,
             )
         ]
     )

@@ -164,6 +164,39 @@ class PositionManager:
         for broker_id in sorted(set(local_positions) & set(broker_positions)):
             local = local_positions[broker_id]
             broker = broker_positions[broker_id]
+
+            attempt = self.storage.get_execution_attempt(local.local_id)
+            expected_stop = (
+                attempt.stop_loss
+                if attempt is not None
+                else local.stop_loss_rate
+            )
+            if expected_stop is not None:
+                actual_stop = broker.stop_loss_rate
+                side = local.side.strip().upper()
+                tolerance = max(0.01, abs(expected_stop) * 0.001)
+                stop_missing = actual_stop is None
+                stop_worse = (
+                    actual_stop is not None
+                    and (
+                        (side == "BUY" and actual_stop < expected_stop - tolerance)
+                        or (side == "SELL" and actual_stop > expected_stop + tolerance)
+                    )
+                )
+                if stop_missing or stop_worse:
+                    issues.append(
+                        ReconciliationIssue(
+                            code="BROKER_STOP_LOSS_MISMATCH",
+                            broker_id=broker_id,
+                            local_id=local.local_id,
+                            detail=(
+                                f"Broker stop loss for {broker_id} ({local.symbol}) "
+                                f"is {actual_stop}; expected no worse than {expected_stop} "
+                                f"for {side}"
+                            ),
+                        )
+                    )
+
             updated = local.model_copy(
                 update={
                     "amount_usd": broker.amount_usd,
