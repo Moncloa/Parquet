@@ -217,8 +217,17 @@ class DemoExecutionAdapter:
             ),
         )
 
-        pnl_after = await self.client.account_pnl()
-        visible_positions = _position_ids_from_pnl(pnl_after)
+        try:
+            pnl_after = await self.client.account_pnl()
+            visible_positions = _position_ids_from_pnl(pnl_after)
+        except (EtoroExecutionError, EtoroExecutionTransportError, RuntimeError) as exc:
+            return self._mark_unknown(
+                acknowledged,
+                datetime.now(UTC),
+                reason=f"demo_position_verification_failed:{type(exc).__name__}",
+                request_id=submission_request_id,
+                broker_order_id=broker_order_id,
+            )
         if acknowledged.broker_position_id not in visible_positions:
             return self._mark_unknown(
                 acknowledged,
