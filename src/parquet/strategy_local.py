@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -35,12 +35,12 @@ class LocalStrategySettings:
     queue_dir: Path = Path("/var/lib/parquet-exchange")
     base_url: str = "http://127.0.0.1:11434"
     model: str = "hf.co/mradermacher/ODA-Fin-SFT-8B-GGUF:Q5_K_M"
-    timeout_seconds: int = 300
+    timeout_seconds: int = 180
     poll_seconds: float = 5.0
     keep_alive: str = "15m"
-    context_length: int = 4096
-    max_output_tokens: int = 384
-    max_candidates: int = 3
+    context_length: int = 3072
+    max_output_tokens: int = 224
+    max_candidates: int = 2
 
     @classmethod
     def from_env(cls) -> LocalStrategySettings:
@@ -54,61 +54,45 @@ class LocalStrategySettings:
         ).strip()
         if not model:
             raise ValueError("PARQUET_LOCAL_LLM_MODEL cannot be empty")
-        max_candidates = int(os.getenv("PARQUET_LOCAL_LLM_MAX_CANDIDATES", "3"))
-        max_output_tokens = int(os.getenv("PARQUET_LOCAL_LLM_MAX_OUTPUT_TOKENS", "384"))
+        max_candidates = int(os.getenv("PARQUET_LOCAL_LLM_MAX_CANDIDATES", "2"))
+        max_output_tokens = int(os.getenv("PARQUET_LOCAL_LLM_MAX_OUTPUT_TOKENS", "224"))
         if max_candidates < 1:
             raise ValueError("PARQUET_LOCAL_LLM_MAX_CANDIDATES must be at least 1")
-        if max_output_tokens < 192:
-            raise ValueError("PARQUET_LOCAL_LLM_MAX_OUTPUT_TOKENS must be at least 192")
+        if max_output_tokens < 128:
+            raise ValueError("PARQUET_LOCAL_LLM_MAX_OUTPUT_TOKENS must be at least 128")
         return cls(
             queue_dir=Path(os.getenv("PARQUET_STRATEGY_QUEUE", "/var/lib/parquet-exchange")),
             base_url=base_url,
             model=model,
-            timeout_seconds=int(os.getenv("PARQUET_LOCAL_LLM_TIMEOUT_SECONDS", "300")),
+            timeout_seconds=int(os.getenv("PARQUET_LOCAL_LLM_TIMEOUT_SECONDS", "180")),
             poll_seconds=float(os.getenv("PARQUET_STRATEGY_POLL_SECONDS", "5")),
             keep_alive=os.getenv("PARQUET_LOCAL_LLM_KEEP_ALIVE", "15m"),
-            context_length=int(os.getenv("PARQUET_LOCAL_LLM_CONTEXT_LENGTH", "4096")),
+            context_length=int(os.getenv("PARQUET_LOCAL_LLM_CONTEXT_LENGTH", "3072")),
             max_output_tokens=max_output_tokens,
             max_candidates=max_candidates,
         )
 
 
-class LocalProposalDecision(BaseModel):
-    symbol: str = Field(min_length=1)
-    side: Side
-    stop_loss: float = Field(gt=0)
-    take_profit: float | None
-    confidence: float = Field(ge=0, le=1)
-    ttl_minutes: int = Field(ge=2, le=30)
-    rationale: str = Field(min_length=1, max_length=180)
-    risk: str | None
-
-
-class LocalWatchDecision(BaseModel):
-    symbol: str = Field(min_length=1)
-    bias: Bias
-    trigger_type: TriggerType
-    trigger_price: float = Field(gt=0)
-    invalidation: float | None = Field(gt=0)
-    ttl_minutes: int = Field(ge=2, le=30)
-    rationale: str = Field(min_length=1, max_length=180)
+class LocalAction(StrEnum):
+    NONE = "NONE"
+    BUY = "BUY"
+    SELL = "SELL"
+    WATCH_BUY = "WATCH_BUY"
+    WATCH_SELL = "WATCH_SELL"
 
 
 class LocalStrategyDecision(BaseModel):
-    market_regime: str = Field(min_length=1, max_length=80)
-    summary: str = Field(min_length=1, max_length=240)
-    proposal: LocalProposalDecision | None
-    watch: LocalWatchDecision | None
-    next_review_minutes: int = Field(ge=1, le=60)
+    action: LocalAction
+    symbol: str | None
+    stop: float | None = Field(gt=0)
+    target: float | None = Field(gt=0)
+    trigger: float | None = Field(gt=0)
+    confidence: float = Field(ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=120)
 
 
 class LocalStrategyWorker:
-    """Isolated recurring strategy analyst backed by loopback-only Ollama.
-
-    Qwen's advisory shortlist constrains the expensive ODA-Fin review. ODA-Fin
-    returns a compact decision, while Parquet deterministically constructs and
-    validates the full MarketAnalysis object.
-    """
+    """CPU-bounded recurring local strategy analyst."""
 
     def __init__(
         self,
@@ -152,9 +136,34 @@ class LocalStrategyWorker:
         return self._ready, self._status_message
 
     async def analyze(self, request: ReviewRequest) -> MarketAnalysis:
-        prompt_request = _compact_local_strategy_request(request, self.settings)
-        prompt = _local_strategy_prompt(prompt_request)
+        prompt_data, selected = _local_prompt_data(request, self.settings.max_candidates)
+        if not selected:
+            generated_at = datetime.now(UTC)
+            self._last_inference = {
+                "request_id": request.request_id,
+                "prompt_chars": 0,
+                "selected_symbols": [],
+                "wall_ms": 0.0,
+                "status": "skipped_no_fresh_candidates",
+            }
+            analysis = _decision_to_analysis(
+                LocalStrategyDecision(
+                    action=LocalAction.NONE,
+                    symbol=None,
+                    stop=None,
+                    target=None,
+                    trigger=None,
+                    confidence=0.0,
+                    reason="No fresh shortlisted candidate with executable bid/ask.",
+                ),
+                original_request=request,
+                selected_symbols=[],
+                generated_at=generated_at,
+            )
+            _validate_analysis_for_request(analysis, request)
+            return analysis
 
+        prompt = _local_strategy_prompt(prompt_data)
         payload: dict[str, Any] = {
             "model": self.settings.model,
             "stream": False,
@@ -165,9 +174,9 @@ class LocalStrategyWorker:
                 {
                     "role": "system",
                     "content": (
-                        "You are Parquet's local intraday strategy analyst. "
-                        "Use only supplied data. No web, no invented news, no broker authority. "
-                        "Return schema-valid JSON only and keep text fields terse."
+                        "You are an intraday financial setup validator. "
+                        "Use only supplied data. No news invention. No broker authority. "
+                        "Return schema-valid JSON only."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -178,6 +187,7 @@ class LocalStrategyWorker:
                 "num_predict": self.settings.max_output_tokens,
             },
         }
+
         started = time.monotonic()
         try:
             async with httpx.AsyncClient(
@@ -189,7 +199,7 @@ class LocalStrategyWorker:
             self._last_inference = {
                 "request_id": request.request_id,
                 "prompt_chars": len(prompt),
-                "selected_symbols": prompt_request.symbols,
+                "selected_symbols": selected,
                 "wall_ms": round((time.monotonic() - started) * 1000.0, 1),
                 "status": "request_error",
                 "error": type(exc).__name__,
@@ -203,7 +213,7 @@ class LocalStrategyWorker:
             self._last_inference = {
                 "request_id": request.request_id,
                 "prompt_chars": len(prompt),
-                "selected_symbols": prompt_request.symbols,
+                "selected_symbols": selected,
                 "wall_ms": round(elapsed * 1000.0, 1),
                 "status": f"http_{response.status_code}",
             }
@@ -219,7 +229,7 @@ class LocalStrategyWorker:
         self._last_inference = {
             "request_id": request.request_id,
             "prompt_chars": len(prompt),
-            "selected_symbols": prompt_request.symbols,
+            "selected_symbols": selected,
             "wall_ms": round(elapsed * 1000.0, 1),
             "status": "ok",
             **_ollama_telemetry(body),
@@ -232,14 +242,12 @@ class LocalStrategyWorker:
         try:
             decision = LocalStrategyDecision.model_validate_json(raw)
         except Exception as exc:
-            raise RuntimeError(
-                f"local strategy returned invalid compact decision JSON: {exc}"
-            ) from exc
+            raise RuntimeError(f"local strategy returned invalid flat decision JSON: {exc}") from exc
 
         analysis = _decision_to_analysis(
             decision,
             original_request=request,
-            prompt_request=prompt_request,
+            selected_symbols=selected,
             generated_at=datetime.now(UTC),
         )
         _validate_analysis_for_request(analysis, request)
@@ -316,167 +324,92 @@ class LocalStrategyWorker:
         )
 
 
-def _local_strategy_prompt(request: ReviewRequest) -> str:
+def _local_strategy_prompt(data: dict[str, object]) -> str:
     return (
-        "Evaluate the supplied intraday candidates and return one compact decision. "
-        "Compare all supplied symbols. AIR/AIR.PA is forbidden. "
-        "Current executable prices come only from quotes. "
-        "For a proposal, choose BUY or SELL plus stop_loss, optional take_profit, "
-        "confidence, ttl_minutes and a terse rationale; Parquet derives entry from "
-        "current ask for BUY or bid for SELL. Prefer reward/risk around 1.5+ when justified. "
-        "Use proposal=null if no immediate trade is justified. "
-        "Use watch only for a near-threshold REASSESS setup; otherwise watch=null. "
-        "Never invent news or unavailable data. Keep summary under two short sentences. "
-        "next_review_minutes must be 1-60.\nDATA="
-        + json.dumps(request.model_dump(mode="json"), separators=(",", ":"), default=str)
+        "Choose best intraday setup. action=NONE|BUY|SELL|WATCH_BUY|WATCH_SELL. "
+        "BUY/SELL: symbol+stop, target optional, trigger=null. "
+        "WATCH_*: symbol+trigger, stop optional invalidation, target=null. "
+        "NONE: symbol/stop/target/trigger=null. Entry later uses ask(BUY)/bid(SELL). "
+        "Prefer RR>=1.5. confidence 0..1; reason<=120 chars. AIR/AIR.PA forbidden. "
+        "Keys s=symbol,b=bid,a=ask,age=quote age,q=Qwen,h=history,r=scanner. DATA="
+        + json.dumps(data, separators=(",", ":"), default=str)
     )
 
 
-def _compact_local_strategy_request(
+def _local_prompt_data(
     request: ReviewRequest,
-    settings: LocalStrategySettings,
-) -> ReviewRequest:
-    context = copy.deepcopy(request.context)
-    market_data = context.get("market_data")
+    limit: int,
+) -> tuple[dict[str, object], list[str]]:
+    market_data = request.context.get("market_data")
     if not isinstance(market_data, dict):
-        return request.model_copy(update={"context": context})
+        return {"c": []}, []
+    quotes = market_data.get("quotes")
+    if not isinstance(quotes, dict):
+        return {"c": []}, []
 
     wide_scanner = market_data.get("wide_scanner")
-    selected = _selected_symbols(wide_scanner, settings.max_candidates)
+    ranked = _ranked_symbols(wide_scanner) or [str(symbol) for symbol in request.symbols]
 
-    quotes = market_data.get("quotes")
-    if not selected and isinstance(quotes, dict):
-        allowed = {symbol.upper() for symbol in request.symbols}
-        selected = [
-            str(symbol)
-            for symbol in quotes
-            if str(symbol).upper() in allowed
-        ][: settings.max_candidates]
-    selected_upper = {symbol.upper() for symbol in selected}
+    selected: list[str] = []
+    candidates: list[dict[str, object]] = []
+    for symbol in ranked:
+        if len(selected) >= limit:
+            break
+        if symbol.upper() in {"AIR", "AIR.PA"}:
+            continue
+        quote = _quote_from_mapping(quotes, symbol)
+        if quote is None or quote.get("stale") is True:
+            continue
+        bid = quote.get("bid")
+        ask = quote.get("ask")
+        if not _positive_number(bid) or not _positive_number(ask):
+            continue
 
-    compact_quotes: dict[str, object] = {}
-    if isinstance(quotes, dict):
-        for symbol, value in quotes.items():
-            if str(symbol).upper() not in selected_upper or not isinstance(value, dict):
-                continue
-            compact_quotes[str(symbol)] = {
-                key: value[key]
-                for key in (
-                    "instrument_id",
-                    "bid",
-                    "ask",
-                    "last_price",
-                    "timestamp",
-                    "age_seconds",
-                    "stale",
-                )
-                if key in value
-            }
+        candidate: dict[str, object] = {"s": symbol, "b": bid, "a": ask}
+        age = quote.get("age_seconds")
+        if _finite_number(age):
+            candidate["age"] = round(float(age), 2)
 
-    compact_history: dict[str, object] = {}
-    history = market_data.get("history")
-    if isinstance(history, dict):
-        for symbol, value in history.items():
-            if str(symbol).upper() not in selected_upper or not isinstance(value, dict):
-                continue
-            compact_history[str(symbol)] = {
-                key: value[key]
-                for key in (
-                    "sample_count",
-                    "span_minutes",
-                    "first_at",
-                    "last_at",
-                    "metrics",
-                )
-                if key in value
-            }
+        history = market_data.get("history")
+        if isinstance(history, dict):
+            history_value = _value_for_symbol(history, symbol)
+            if isinstance(history_value, dict):
+                compact_history = _compact_history_metrics(history_value.get("metrics"))
+                if compact_history:
+                    candidate["h"] = compact_history
 
-    compact_market: dict[str, object] = {
-        "provider": market_data.get("provider", "etoro"),
-        "captured_at": market_data.get("captured_at"),
-        "quotes": compact_quotes,
-        "history": compact_history,
-    }
+        scanner_candidate = _scanner_candidate(wide_scanner, symbol)
+        if scanner_candidate is not None:
+            compact_scanner = _compact_scanner_metrics(scanner_candidate)
+            if compact_scanner:
+                candidate["r"] = compact_scanner
 
-    if isinstance(wide_scanner, dict):
-        candidates = wide_scanner.get("candidates")
-        compact_candidates = []
-        if isinstance(candidates, list):
-            compact_candidates = [
-                _compact_scanner_candidate(candidate)
-                for candidate in candidates
-                if isinstance(candidate, dict)
-                and isinstance(candidate.get("symbol"), str)
-                and str(candidate["symbol"]).upper() in selected_upper
-            ]
+        qwen = _qwen_candidate(wide_scanner, symbol)
+        if qwen is not None:
+            compact_qwen: dict[str, object] = {}
+            classification = qwen.get("classification")
+            score = qwen.get("score")
+            reason = qwen.get("reason")
+            if isinstance(classification, str):
+                compact_qwen["class"] = classification
+            if _finite_number(score):
+                compact_qwen["score"] = score
+            if isinstance(reason, str) and reason:
+                compact_qwen["why"] = reason[:80]
+            if compact_qwen:
+                candidate["q"] = compact_qwen
 
-        local_screener = wide_scanner.get("local_screener")
-        compact_screener: dict[str, object] | None = None
-        if isinstance(local_screener, dict):
-            shortlist = local_screener.get("shortlist")
-            compact_screener = {
-                "status": local_screener.get("status"),
-                "model": local_screener.get("model"),
-                "shortlist": [
-                    item
-                    for item in shortlist
-                    if isinstance(item, dict)
-                    and isinstance(item.get("symbol"), str)
-                    and str(item["symbol"]).upper() in selected_upper
-                ]
-                if isinstance(shortlist, list)
-                else [],
-            }
+        selected.append(symbol)
+        candidates.append(candidate)
 
-        compact_scanner: dict[str, object] = {
-            "source": wide_scanner.get("source"),
-            "ranking": wide_scanner.get("ranking"),
-            "candidates": compact_candidates,
-            "selected_for_local_strategy": selected,
-        }
-        if compact_screener is not None:
-            compact_scanner["local_screener"] = compact_screener
-        compact_market["wide_scanner"] = compact_scanner
-
-    compact_context: dict[str, object] = {"market_data": compact_market}
-    risk_snapshot = context.get("risk_snapshot")
-    if isinstance(risk_snapshot, dict):
-        compact_context["risk_snapshot"] = risk_snapshot
-
-    return request.model_copy(
-        update={
-            "symbols": selected,
-            "context": compact_context,
-        }
-    )
+    return {"c": candidates}, selected
 
 
-def _compact_scanner_candidate(candidate: dict[str, object]) -> dict[str, object]:
-    keys = (
-        "symbol",
-        "score",
-        "change_pct_stream",
-        "change_pct_2m",
-        "change_pct_5m",
-        "change_pct_15m",
-        "directional_efficiency",
-        "persistence",
-        "spike_ratio",
-        "tick_rate_per_min",
-        "acceleration_pct_per_min",
-        "step_volatility_bps",
-        "span_minutes",
-        "spread_bps",
-    )
-    return {key: candidate[key] for key in keys if key in candidate}
-
-
-def _selected_symbols(wide_scanner: object, limit: int) -> list[str]:
+def _ranked_symbols(wide_scanner: object) -> list[str]:
     if not isinstance(wide_scanner, dict):
         return []
-
     candidates = wide_scanner.get("candidates")
-    candidate_symbols = (
+    known = (
         {
             str(item["symbol"]).upper(): str(item["symbol"])
             for item in candidates
@@ -488,110 +421,170 @@ def _selected_symbols(wide_scanner: object, limit: int) -> list[str]:
         else {}
     )
 
+    result: list[str] = []
+    seen: set[str] = set()
     local_screener = wide_scanner.get("local_screener")
     shortlist = local_screener.get("shortlist") if isinstance(local_screener, dict) else None
-    selected: list[str] = []
-    seen: set[str] = set()
-
     if isinstance(shortlist, list):
         for item in shortlist:
             if not isinstance(item, dict):
                 continue
-            raw_symbol = item.get("symbol")
-            if not isinstance(raw_symbol, str):
+            symbol = item.get("symbol")
+            if not isinstance(symbol, str):
                 continue
-            key = raw_symbol.upper()
-            if key not in candidate_symbols or key in seen:
+            key = symbol.upper()
+            if key in seen:
                 continue
-            selected.append(candidate_symbols[key])
+            result.append(known.get(key, symbol))
             seen.add(key)
-            if len(selected) >= limit:
-                return selected
 
     if isinstance(candidates, list):
         for item in candidates:
             if not isinstance(item, dict):
                 continue
-            raw_symbol = item.get("symbol")
-            if not isinstance(raw_symbol, str) or not raw_symbol.strip():
+            symbol = item.get("symbol")
+            if not isinstance(symbol, str) or not symbol.strip():
                 continue
-            key = raw_symbol.upper()
+            key = symbol.upper()
             if key in seen:
                 continue
-            selected.append(raw_symbol)
+            result.append(symbol)
             seen.add(key)
-            if len(selected) >= limit:
-                break
-    return selected
+    return result
+
+
+def _compact_history_metrics(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    aliases = {
+        "change_pct_5m": "c5",
+        "change_pct_15m": "c15",
+        "change_pct_60m": "c60",
+        "high_60m": "hi60",
+        "low_60m": "lo60",
+        "range_pct_60m": "range60",
+        "step_volatility_bps_60m": "vol60",
+    }
+    return {
+        alias: value[key]
+        for key, alias in aliases.items()
+        if _finite_number(value.get(key))
+    }
+
+
+def _compact_scanner_metrics(value: dict[str, object]) -> dict[str, object]:
+    aliases = {
+        "score": "score",
+        "change_pct_stream": "stream",
+        "change_pct_2m": "c2",
+        "change_pct_5m": "c5",
+        "change_pct_15m": "c15",
+        "directional_efficiency": "eff",
+        "persistence": "pers",
+        "spike_ratio": "spike",
+        "tick_rate_per_min": "tick",
+        "acceleration_pct_per_min": "accel",
+        "step_volatility_bps": "vol",
+        "spread_bps": "spread",
+    }
+    return {
+        alias: value[key]
+        for key, alias in aliases.items()
+        if _finite_number(value.get(key))
+    }
+
+
+def _scanner_candidate(wide_scanner: object, symbol: str) -> dict[str, object] | None:
+    if not isinstance(wide_scanner, dict):
+        return None
+    candidates = wide_scanner.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    for item in candidates:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("symbol"), str)
+            and str(item["symbol"]).upper() == symbol.upper()
+        ):
+            return item
+    return None
+
+
+def _qwen_candidate(wide_scanner: object, symbol: str) -> dict[str, object] | None:
+    if not isinstance(wide_scanner, dict):
+        return None
+    local_screener = wide_scanner.get("local_screener")
+    shortlist = local_screener.get("shortlist") if isinstance(local_screener, dict) else None
+    if not isinstance(shortlist, list):
+        return None
+    for item in shortlist:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("symbol"), str)
+            and str(item["symbol"]).upper() == symbol.upper()
+        ):
+            return item
+    return None
 
 
 def _decision_to_analysis(
     decision: LocalStrategyDecision,
     *,
     original_request: ReviewRequest,
-    prompt_request: ReviewRequest,
+    selected_symbols: list[str],
     generated_at: datetime,
 ) -> MarketAnalysis:
-    allowed = {symbol.upper() for symbol in prompt_request.symbols}
-
+    allowed = {symbol.upper() for symbol in selected_symbols}
     proposal: TradeProposal | None = None
-    if decision.proposal is not None:
-        proposal_decision = decision.proposal
-        if proposal_decision.symbol.upper() not in allowed:
-            raise RuntimeError(
-                f"local strategy proposed non-shortlisted symbol: {proposal_decision.symbol}"
-            )
-        quote = _quote_for_symbol(original_request, proposal_decision.symbol)
-        entry_raw = (
-            quote.get("ask")
-            if proposal_decision.side == Side.BUY
-            else quote.get("bid")
-        )
-        if not isinstance(entry_raw, (int, float)) or isinstance(entry_raw, bool):
-            raise RuntimeError(
-                f"missing executable quote for {proposal_decision.symbol}"
-            )
+    watch: WatchItem | None = None
+
+    if decision.action != LocalAction.NONE:
+        if decision.symbol is None or decision.symbol.upper() not in allowed:
+            raise RuntimeError("local strategy chose a non-shortlisted symbol")
+
+    if decision.action in {LocalAction.BUY, LocalAction.SELL}:
+        if decision.symbol is None or decision.stop is None:
+            raise RuntimeError("BUY/SELL decision requires symbol and stop")
+        if decision.trigger is not None:
+            raise RuntimeError("BUY/SELL decision must not set trigger")
+        side = Side.BUY if decision.action == LocalAction.BUY else Side.SELL
+        quote = _quote_for_symbol(original_request, decision.symbol)
+        entry_raw = quote.get("ask") if side == Side.BUY else quote.get("bid")
+        if not _positive_number(entry_raw):
+            raise RuntimeError(f"missing executable quote for {decision.symbol}")
         proposal = TradeProposal(
             proposal_id=f"local-{uuid4().hex[:12]}",
-            symbol=proposal_decision.symbol,
-            side=proposal_decision.side,
+            symbol=decision.symbol,
+            side=side,
             entry=float(entry_raw),
-            stop_loss=proposal_decision.stop_loss,
-            take_profit=proposal_decision.take_profit,
-            confidence=proposal_decision.confidence,
+            stop_loss=decision.stop,
+            take_profit=decision.target,
+            confidence=decision.confidence,
             generated_at=generated_at,
-            expires_at=generated_at
-            + timedelta(minutes=proposal_decision.ttl_minutes),
-            thesis=[proposal_decision.rationale],
-            risks=(
-                []
-                if proposal_decision.risk is None
-                else [proposal_decision.risk]
-            ),
+            expires_at=generated_at + timedelta(minutes=10),
+            thesis=[decision.reason],
+            risks=[],
         )
-
-    watch: WatchItem | None = None
-    if decision.watch is not None:
-        watch_decision = decision.watch
-        if watch_decision.symbol.upper() not in allowed:
-            raise RuntimeError(
-                f"local strategy watched non-shortlisted symbol: {watch_decision.symbol}"
-            )
+    elif decision.action in {LocalAction.WATCH_BUY, LocalAction.WATCH_SELL}:
+        if decision.symbol is None or decision.trigger is None:
+            raise RuntimeError("WATCH decision requires symbol and trigger")
+        if decision.target is not None:
+            raise RuntimeError("WATCH decision must not set target")
+        is_buy = decision.action == LocalAction.WATCH_BUY
         watch = WatchItem(
             watch_id=f"local-watch-{uuid4().hex[:12]}",
-            symbol=watch_decision.symbol,
-            bias=watch_decision.bias,
+            symbol=decision.symbol,
+            bias=Bias.LONG if is_buy else Bias.SHORT,
             trigger=Trigger(
-                type=watch_decision.trigger_type,
-                price=watch_decision.trigger_price,
+                type=TriggerType.PRICE_ABOVE if is_buy else TriggerType.PRICE_BELOW,
+                price=decision.trigger,
                 timeframe=None,
             ),
-            invalidation=watch_decision.invalidation,
-            expires_at=generated_at
-            + timedelta(minutes=watch_decision.ttl_minutes),
+            invalidation=decision.stop,
+            expires_at=generated_at + timedelta(minutes=10),
             on_trigger=TriggerAction.REASSESS,
             proposal_id=None,
-            rationale=watch_decision.rationale,
+            rationale=decision.reason,
         )
 
     return MarketAnalysis(
@@ -599,13 +592,13 @@ def _decision_to_analysis(
         analysis_id=f"local-analysis-{uuid4().hex[:12]}",
         review_request_id=original_request.request_id,
         generated_at=generated_at,
-        market_regime=decision.market_regime,
-        summary=decision.summary,
+        market_regime="local_compact",
+        summary=decision.reason,
         sources=[],
         watch=[] if watch is None else [watch],
         trade_proposals=[] if proposal is None else [proposal],
         next_review=NextReview(
-            at=generated_at + timedelta(minutes=decision.next_review_minutes),
+            at=generated_at + timedelta(minutes=5),
             reason="local_strategy_followup",
         ),
     )
@@ -618,13 +611,45 @@ def _quote_for_symbol(request: ReviewRequest, symbol: str) -> dict[str, object]:
     quotes = market_data.get("quotes")
     if not isinstance(quotes, dict):
         raise RuntimeError("review request has no quotes")
+    quote = _quote_from_mapping(quotes, symbol)
+    if quote is None:
+        raise RuntimeError(f"review request has no quote for {symbol}")
+    return quote
+
+
+def _quote_from_mapping(
+    quotes: dict[object, object],
+    symbol: str,
+) -> dict[str, object] | None:
     direct = quotes.get(symbol)
     if isinstance(direct, dict):
         return direct
     for key, value in quotes.items():
         if str(key).upper() == symbol.upper() and isinstance(value, dict):
             return value
-    raise RuntimeError(f"review request has no quote for {symbol}")
+    return None
+
+
+def _value_for_symbol(mapping: dict[object, object], symbol: str) -> object:
+    direct = mapping.get(symbol)
+    if direct is not None:
+        return direct
+    for key, value in mapping.items():
+        if str(key).upper() == symbol.upper():
+            return value
+    return None
+
+
+def _positive_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value) > 0
+    )
+
+
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _ollama_telemetry(body: object) -> dict[str, object]:
@@ -638,7 +663,6 @@ def _ollama_telemetry(body: object) -> dict[str, object]:
         value = body.get(input_key)
         if isinstance(value, int) and not isinstance(value, bool):
             result[output_key] = value
-
     for input_key, output_key in (
         ("total_duration", "ollama_total_ms"),
         ("load_duration", "load_ms"),
@@ -648,7 +672,6 @@ def _ollama_telemetry(body: object) -> dict[str, object]:
         value = body.get(input_key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             result[output_key] = round(float(value) / 1_000_000.0, 1)
-
     eval_count = body.get("eval_count")
     eval_duration = body.get("eval_duration")
     if (
