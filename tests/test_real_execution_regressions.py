@@ -147,6 +147,8 @@ async def test_autonomous_real_recovers_when_filled_position_appears_late(tmp_pa
                         side=attempt.side,
                         amount_usd=attempt.amount_usd,
                         leverage=float(attempt.leverage),
+                        stop_loss_rate=attempt.stop_loss,
+                        take_profit_rate=attempt.take_profit,
                     )
                 ]
             manager.reconcile(_snapshot(at, positions))
