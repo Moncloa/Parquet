@@ -13,6 +13,7 @@ from parquet.execution.autonomous import (
 )
 from parquet.execution.demo import DemoExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
+from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.models import (
     Bias,
     MarketAnalysis,
@@ -26,6 +27,7 @@ from parquet.models import (
 )
 from parquet.orchestrator import Orchestrator
 from parquet.portfolio import PositionManager
+from parquet.reconciliation import ReconciliationService
 
 _WIDE_MIN_SAMPLES = 10
 _WIDE_MIN_SPAN_SECONDS = 120.0
@@ -34,9 +36,9 @@ _WIDE_MIN_SPAN_SECONDS = 120.0
 class AutonomousOrchestrator(Orchestrator):
     """Orchestrator variant that routes EXECUTE watches through the durable ledger.
 
-    Autonomous execution is limited to shadow/demo validation. Real broker writes
-    remain unavailable; the coordinator still enforces fresh reconciliation and
-    unresolved-outcome blocking before preparing an attempt.
+    Autonomous execution supports shadow, demo, and explicitly enabled real mode.
+    Real writes remain fail-closed behind reconciliation, risk gates, broker preflight,
+    durable idempotency, and unresolved-outcome blocking.
     """
 
     def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
@@ -77,11 +79,54 @@ class AutonomousOrchestrator(Orchestrator):
                 self.storage.set("demo_execution_ready", "1")
                 self.storage.set("demo_execution_error", "")
 
+        self.real_execution: RealSmallExecutionAdapter | None = None
+        self.real_reconciliation: ReconciliationService | None = None
+        self.real_client: EtoroExecutionClient | None = None
+        if (
+            self.settings.execution.autonomous_mode == "real"
+            and self.settings.execution.autonomous_real_enabled
+        ):
+            try:
+                self.real_client = EtoroExecutionClient(
+                    api_key=_read_secret(
+                        self.settings.etoro.api_key_file,
+                        "eToro API key",
+                    ),
+                    user_key=_read_secret(
+                        self.settings.etoro.user_key_file,
+                        "eToro User key",
+                    ),
+                    base_url=self.settings.etoro.execution_base_url,
+                    identity_base_url=self.settings.etoro.base_url,
+                    environment="real",
+                )
+                self.real_reconciliation = ReconciliationService(
+                    self.settings,
+                    self.storage,
+                    self.market_client,
+                )
+                self.real_execution = RealSmallExecutionAdapter(
+                    settings=self.settings,
+                    storage=self.storage,
+                    position_manager=self.real_reconciliation.position_manager,
+                    reconciliation=self.real_reconciliation,
+                    client=self.real_client,
+                )
+            except Exception as exc:
+                self.real_execution = None
+                self.real_reconciliation = None
+                self.real_client = None
+                self.storage.set("real_execution_ready", "0")
+                self.storage.set("real_execution_error", str(exc))
+            else:
+                self.storage.set("real_execution_ready", "1")
+                self.storage.set("real_execution_error", "")
+
     def process_analysis(self, analysis: MarketAnalysis) -> None:
         super().process_analysis(analysis)
         if not self.settings.execution.autonomous_enabled:
             return
-        if self.settings.execution.autonomous_mode not in {"shadow", "demo"}:
+        if self.settings.execution.autonomous_mode not in {"shadow", "demo", "real"}:
             return
 
         for proposal in analysis.trade_proposals:
@@ -474,8 +519,15 @@ class AutonomousOrchestrator(Orchestrator):
             return
 
         mode = self.settings.execution.autonomous_mode
-        if mode == "real":
-            payload["reasons"] = ["autonomous_real_execution_not_implemented"]
+        if mode == "real" and not self.settings.execution.autonomous_real_enabled:
+            payload["reasons"] = ["autonomous_real_execution_disabled"]
+            self.storage.add_event("execution_blocked", json.dumps(payload))
+            return
+        if mode == "real" and self.real_execution is None:
+            payload["reasons"] = [
+                self.storage.get("real_execution_error")
+                or "real_execution_adapter_unavailable"
+            ]
             self.storage.add_event("execution_blocked", json.dumps(payload))
             return
         if mode == "demo" and not self.settings.execution.autonomous_demo_enabled:
@@ -516,20 +568,34 @@ class AutonomousOrchestrator(Orchestrator):
             )
             return
 
+        if mode == "demo":
+            if attempt.state == ExecutionAttemptState.PREPARED:
+                attempt = self.autonomous_execution.mark_demo_pending(
+                    attempt,
+                    now=observation.observed_at,
+                )
+            payload["attempt"] = attempt.model_dump(mode="json")
+            self.storage.add_event(
+                "execution_demo_queued",
+                json.dumps(payload, default=str),
+            )
+            return
+
         if attempt.state == ExecutionAttemptState.PREPARED:
-            attempt = self.autonomous_execution.mark_demo_pending(
+            attempt = self.autonomous_execution.mark_real_pending(
                 attempt,
                 now=observation.observed_at,
             )
         payload["attempt"] = attempt.model_dump(mode="json")
         self.storage.add_event(
-            "execution_demo_queued",
+            "execution_real_queued",
             json.dumps(payload, default=str),
         )
 
     async def poll_market_once(self, now: datetime | None = None) -> int:
         processed = await super().poll_market_once(now)
         await self._process_demo_pending(now)
+        await self._process_real_pending(now)
         return processed
 
     async def _process_demo_pending(self, now: datetime | None = None) -> int:
@@ -632,6 +698,180 @@ class AutonomousOrchestrator(Orchestrator):
                 ),
             )
             return 0
+        return 1
+
+    async def _process_real_pending(self, now: datetime | None = None) -> int:
+        if (
+            not self.settings.execution.autonomous_enabled
+            or self.settings.execution.autonomous_mode != "real"
+            or not self.settings.execution.autonomous_real_enabled
+            or self.real_execution is None
+            or self.real_reconciliation is None
+            or self.real_client is None
+        ):
+            return 0
+
+        pending = self.storage.real_pending_execution_attempts(limit=1)
+        if not pending:
+            return 0
+
+        attempt = pending[0]
+        proposal = self.storage.get_proposal(attempt.proposal_id)
+        if proposal is None or self.market_client is None:
+            return self._block_real_attempt(
+                attempt,
+                "proposal_or_market_context_unavailable",
+            )
+
+        await self.real_reconciliation.poll_once(force=True)
+        report = self.storage.get_reconciliation_report()
+        snapshot = self.storage.get_risk_snapshot()
+        if (
+            report is None
+            or not report.trading_enabled
+            or snapshot is None
+            or snapshot.equity_usd is None
+        ):
+            return self._block_real_attempt(
+                attempt,
+                "real_reconciliation_or_risk_not_ready",
+            )
+
+        try:
+            rates = await self.market_client.rates([attempt.instrument_id])
+        except Exception as exc:
+            return self._block_real_attempt(
+                attempt,
+                f"fresh_quote_error:{type(exc).__name__}",
+            )
+
+        rate = next(
+            (
+                item
+                for item in rates
+                if item.instrument_id == attempt.instrument_id
+            ),
+            None,
+        )
+        if rate is None or rate.bid is None or rate.ask is None:
+            return self._block_real_attempt(
+                attempt,
+                "fresh_bid_ask_unavailable",
+            )
+
+        price = (
+            rate.last_price
+            if rate.last_price is not None
+            else (rate.bid + rate.ask) / 2
+        )
+        observation = MarketObservation(
+            symbol=proposal.symbol,
+            price=price,
+            observed_at=rate.timestamp,
+            instrument_id=attempt.instrument_id,
+            bid=rate.bid,
+            ask=rate.ask,
+        )
+        decision = self.execution_gate.evaluate(
+            proposal,
+            snapshot,
+            observation,
+            now=datetime.now(UTC),
+        )
+        if not decision.approved or decision.amount_usd is None:
+            reasons = ",".join(decision.reasons) or "gate_rejected"
+            return self._block_real_attempt(attempt, reasons)
+
+        try:
+            eligibility = await self.real_client.instrument_eligibility(
+                instrument_id=attempt.instrument_id
+            )
+            if not eligibility.allow_open_position:
+                raise RuntimeError("broker_disallows_open_position")
+            direction = "LONG" if proposal.side == Side.BUY else "SHORT"
+            max_exposure = min(
+                decision.amount_usd,
+                snapshot.equity_usd
+                * self.settings.execution.autonomous_real_max_position_pct
+                / 100.0,
+            )
+            selected: tuple[int, str, float] | None = None
+            for leverage in eligibility.allowed_leverages(direction=direction):
+                if leverage > self.settings.execution.autonomous_real_max_leverage:
+                    continue
+                capital = max_exposure / leverage
+                minimum = eligibility.minimum_amount(
+                    direction=direction,
+                    leverage=leverage,
+                )
+                if minimum is not None and capital + 1e-9 < minimum:
+                    continue
+                settlement = eligibility.settlement_type(
+                    direction=direction,
+                    leverage=leverage,
+                )
+                selected = (leverage, settlement, capital)
+                break
+            if selected is None:
+                raise RuntimeError(
+                    "no_broker_terms_within_autonomous_risk_caps"
+                )
+        except Exception as exc:
+            return self._block_real_attempt(
+                attempt,
+                f"real_broker_preflight:{exc}",
+            )
+
+        leverage, settlement_type, capital = selected
+        refreshed = attempt.model_copy(
+            update={
+                "amount_usd": capital,
+                "leverage": leverage,
+                "settlement_type": settlement_type,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.storage.save_execution_attempt(refreshed)
+
+        try:
+            await self.real_execution.execute_autonomous(refreshed)
+        except RuntimeError as exc:
+            latest = (
+                self.storage.get_execution_attempt(refreshed.attempt_id)
+                or refreshed
+            )
+            if latest.state == ExecutionAttemptState.REAL_PENDING:
+                return self._block_real_attempt(latest, str(exc))
+            self.storage.add_event(
+                "real_execution_runtime_error",
+                json.dumps(
+                    {
+                        "attempt_id": latest.attempt_id,
+                        "state": latest.state.value,
+                        "error": str(exc),
+                    }
+                ),
+            )
+            return 0
+        return 1
+
+    def _block_real_attempt(
+        self,
+        attempt: ExecutionAttempt,
+        reason: str,
+    ) -> int:
+        blocked = attempt.model_copy(
+            update={
+                "state": ExecutionAttemptState.BLOCKED,
+                "reason": reason,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.storage.save_execution_attempt(blocked)
+        self.storage.add_event(
+            "real_execution_blocked",
+            blocked.model_dump_json(),
+        )
         return 1
 
     def _block_demo_attempt(

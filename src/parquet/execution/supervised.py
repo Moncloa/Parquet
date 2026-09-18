@@ -54,8 +54,25 @@ class RealSmallExecutionAdapter:
     ) -> ExecutionAttempt:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         self._assert_supervised_allowed(attempt, confirmation)
-
         await self.reconciliation.poll_once(now=current, force=True)
+        return await self._execute_validated(attempt, current=current)
+
+    async def execute_autonomous(
+        self,
+        attempt: ExecutionAttempt,
+        *,
+        now: datetime | None = None,
+    ) -> ExecutionAttempt:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        self._assert_autonomous_allowed(attempt)
+        return await self._execute_validated(attempt, current=current)
+
+    async def _execute_validated(
+        self,
+        attempt: ExecutionAttempt,
+        *,
+        current: datetime,
+    ) -> ExecutionAttempt:
         self._assert_no_uncertain_execution()
         self.position_manager.assert_trading_enabled(now=current)
         await self._assert_agent_portfolio_identity()
@@ -191,7 +208,7 @@ class RealSmallExecutionAdapter:
         self.storage.save_execution_attempt(acknowledged)
         self._register_broker_identity(acknowledged, datetime.now(UTC))
         self.storage.add_event(
-            "real_small_execution_acknowledged",
+            "real_execution_acknowledged",
             json.dumps(
                 {
                     "attempt": acknowledged.model_dump(mode="json"),
@@ -234,7 +251,7 @@ class RealSmallExecutionAdapter:
             datetime.now(UTC),
         )
         self.storage.set("execution_uncertain", "0")
-        self.storage.add_event("real_small_execution_reconciled", reconciled.model_dump_json())
+        self.storage.add_event("real_execution_reconciled", reconciled.model_dump_json())
         return reconciled
 
     def _assert_supervised_allowed(
@@ -264,6 +281,40 @@ class RealSmallExecutionAdapter:
         expected = f"REAL {attempt.attempt_id}"
         if confirmation != expected:
             raise RuntimeError(f"Explicit confirmation required: {expected}")
+
+    def _assert_autonomous_allowed(self, attempt: ExecutionAttempt) -> None:
+        config = self.settings.execution
+        if not config.autonomous_enabled:
+            raise RuntimeError("Autonomous execution is disabled")
+        if config.autonomous_mode != "real":
+            raise RuntimeError("Autonomous real execution requires autonomous_mode=real")
+        if not config.autonomous_real_enabled:
+            raise RuntimeError("Autonomous real execution is disabled")
+        if self.settings.etoro.expected_gcid is None:
+            raise RuntimeError("Real execution blocked: etoro.expected_gcid is not configured")
+        if attempt.state != ExecutionAttemptState.REAL_PENDING:
+            raise RuntimeError(f"Execution attempt is not REAL_PENDING: {attempt.state}")
+        if attempt.symbol.upper() in {"AIR", "AIR.PA"}:
+            raise RuntimeError("Real execution blocked: excluded_symbol")
+        if attempt.settlement_type is None or not attempt.settlement_type.strip():
+            raise RuntimeError("Real execution blocked: prepared attempt has no settlement_type")
+        if attempt.leverage > config.autonomous_real_max_leverage:
+            raise RuntimeError(
+                f"Leverage x{attempt.leverage} exceeds autonomous real cap "
+                f"x{config.autonomous_real_max_leverage}"
+            )
+
+        snapshot = self.storage.get_risk_snapshot()
+        if snapshot is None or snapshot.equity_usd is None:
+            raise RuntimeError("Real execution blocked: risk snapshot equity is unavailable")
+        maximum_exposure = (
+            snapshot.equity_usd * config.autonomous_real_max_position_pct / 100.0
+        )
+        if attempt.exposure_usd > maximum_exposure + 1e-9:
+            raise RuntimeError(
+                f"Exposure {attempt.exposure_usd:.2f} exceeds autonomous real cap "
+                f"{maximum_exposure:.2f}"
+            )
 
     async def _assert_agent_portfolio_identity(self) -> None:
         expected_gcid = self.settings.etoro.expected_gcid
@@ -431,7 +482,7 @@ class RealSmallExecutionAdapter:
             }
         )
         self.storage.save_execution_attempt(rejected)
-        self.storage.add_event("real_small_execution_rejected", rejected.model_dump_json())
+        self.storage.add_event("real_execution_rejected", rejected.model_dump_json())
         return rejected
 
     def _mark_unknown(
@@ -454,7 +505,7 @@ class RealSmallExecutionAdapter:
         )
         self.storage.save_execution_attempt(unknown)
         self.storage.set("execution_uncertain", "1")
-        self.storage.add_event("real_small_execution_outcome_unknown", unknown.model_dump_json())
+        self.storage.add_event("real_execution_outcome_unknown", unknown.model_dump_json())
         return unknown
 
     def _register_broker_identity(self, attempt: ExecutionAttempt, now: datetime) -> None:
