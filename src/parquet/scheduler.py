@@ -37,6 +37,7 @@ class ReviewQueue:
         now: datetime | None = None,
         *,
         source: str | None = None,
+        key: str | None = None,
     ) -> list[ScheduledReview]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
         due = [
@@ -44,6 +45,7 @@ class ReviewQueue:
             for item in self._items.values()
             if item.at.astimezone(UTC) <= current
             and (source is None or item.source == source)
+            and (key is None or item.key == key)
         ]
         for item in due:
             self.remove(item)
