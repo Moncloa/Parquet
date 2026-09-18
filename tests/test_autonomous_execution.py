@@ -122,3 +122,24 @@ def test_shadow_execution_is_durable(tmp_path) -> None:
 
     assert completed.state == ExecutionAttemptState.SHADOW_EXECUTED
     assert storage.latest_execution_attempts()[0].state == ExecutionAttemptState.SHADOW_EXECUTED
+
+
+def test_real_pending_is_durable(tmp_path) -> None:
+    now = datetime(2026, 9, 18, 13, 45, tzinfo=UTC)
+    storage = Storage(tmp_path / "state.db")
+    _synced(storage, now)
+    coordinator = AutonomousExecutionCoordinator(storage, PositionManager(storage))
+    attempt = coordinator.prepare(
+        proposal=_proposal(now),
+        watch_id="w1",
+        observation=_observation(now),
+        decision=_decision(),
+        now=now,
+    )
+
+    pending = coordinator.mark_real_pending(attempt, now=now)
+
+    assert pending.state == ExecutionAttemptState.REAL_PENDING
+    queued = storage.real_pending_execution_attempts()
+    assert len(queued) == 1
+    assert queued[0].attempt_id == pending.attempt_id
