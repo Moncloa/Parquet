@@ -233,6 +233,7 @@ def _autonomous_adapter(tmp_path, client, snapshots):
     manager = PositionManager(storage)
     reconciliation = FakeReconciliation(storage, manager, snapshots)
     settings = Settings(
+        mode="real",
         etoro=EtoroConfig(expected_gcid=123),
         execution=ExecutionConfig(
             autonomous_enabled=True,
@@ -494,4 +495,31 @@ async def test_autonomous_real_enforces_portfolio_exposure_cap(tmp_path) -> None
     )
 
     with pytest.raises(RuntimeError, match="exceeds autonomous real cap"):
+        await adapter.execute_autonomous(attempt)
+
+
+@pytest.mark.asyncio
+async def test_autonomous_real_requires_global_real_mode(tmp_path) -> None:
+    adapter, storage, reconciliation = _autonomous_adapter(
+        tmp_path,
+        SuccessClient(),
+        [_snapshot()],
+    )
+    adapter.settings = adapter.settings.model_copy(update={"mode": "shadow"})
+    await reconciliation.poll_once(force=True)
+    storage.set_risk_snapshot(
+        RiskSnapshot(
+            as_of=datetime.now(UTC),
+            equity_usd=1_000.0,
+            open_positions=0,
+            trades_today=0,
+            daily_pnl_pct=0.0,
+            weekly_pnl_pct=0.0,
+        )
+    )
+    attempt = _attempt().model_copy(
+        update={"state": ExecutionAttemptState.REAL_PENDING}
+    )
+
+    with pytest.raises(RuntimeError, match="global mode=real"):
         await adapter.execute_autonomous(attempt)
