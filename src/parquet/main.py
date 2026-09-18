@@ -148,27 +148,28 @@ def run_request_review_now(settings_path: Path | None, reason: str) -> int:
             raise RuntimeError("Cannot request review now: eToro identity is not verified")
 
         current = datetime.now(UTC)
-        orchestrator.add_review(
-            ScheduledReview(
-                at=current,
-                reason=normalized_reason,
-                source="manual",
-            )
+        manual_review = ScheduledReview(
+            at=current,
+            reason=normalized_reason,
+            source="manual",
         )
-        posted = await orchestrator.post_due_reviews(now=current)
+        orchestrator.add_review(manual_review)
+        posted = await orchestrator.post_due_reviews(
+            now=current,
+            source="manual",
+            review_key=manual_review.key,
+        )
         return posted, current
 
     posted, requested_at = asyncio.run(request())
-    if posted < 1:
-        raise RuntimeError(f"Expected the manual review request to be posted, got {posted}")
+    if posted != 1:
+        raise RuntimeError(f"Expected exactly one manual review request, got {posted}")
 
     print("Manual review request posted")
     print(f"  reason: {normalized_reason}")
     print(f"  requested_at: {requested_at.isoformat()}")
     print(f"  repository: {settings.github.repository}")
     print(f"  runtime_pr: {settings.github.runtime_pr}")
-    if posted > 1:
-        print(f"  additional_due_reviews_posted: {posted - 1}")
     print("Current eToro market context and risk snapshot were attached.")
     print("No broker order was sent.")
     return 0

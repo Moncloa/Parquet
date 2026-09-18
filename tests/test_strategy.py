@@ -208,3 +208,31 @@ async def test_dispatcher_publishes_valid_result_and_acks_queue(tmp_path) -> Non
     assert published == [analysis]
     assert queue.pending_count() == 0
     assert storage.get("strategy_last_analysis_id") == analysis.analysis_id
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_superseded_review_is_not_global_error(tmp_path) -> None:
+    storage = Storage(tmp_path / "parquet.db")
+    queue = StrategyQueue(tmp_path / "exchange")
+    request = _request()
+    queue.enqueue(request)
+    queue.write_error(
+        request.request_id,
+        "superseded by newer local strategy request request-002",
+    )
+    storage.set("strategy_last_error", "")
+
+    class FakeBridge:
+        async def post_analysis(self, analysis: MarketAnalysis) -> None:
+            raise AssertionError("not used")
+
+    dispatcher = StrategyDispatcher(
+        queue_dir=tmp_path / "exchange",
+        state_db=tmp_path / "parquet.db",
+        storage=storage,
+        bridge=FakeBridge(),  # type: ignore[arg-type]
+    )
+
+    assert await dispatcher.poll_results_once() == 1
+    assert storage.get("strategy_last_error") in (None, "")
+    assert queue.pending_count() == 0

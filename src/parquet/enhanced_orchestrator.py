@@ -322,11 +322,17 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
                 )
         return bootstrapped
 
-    async def post_due_reviews(self, now: datetime | None = None) -> int:
+    async def post_due_reviews(
+        self,
+        now: datetime | None = None,
+        *,
+        source: str | None = None,
+        review_key: str | None = None,
+    ) -> int:
         if self.bridge is None:
             return 0
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        due = self.reviews.due(current)
+        due = self.reviews.due(current, source=source, key=review_key)
         if not due:
             return 0
 

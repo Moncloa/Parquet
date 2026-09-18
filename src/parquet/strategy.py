@@ -210,11 +210,21 @@ class StrategyDispatcher:
             try:
                 record = self.queue.read_error(path)
                 request_id = record.request_id
-                self.storage.set("strategy_last_error", record.error)
-                self.storage.set(
-                    "strategy_last_error_at", record.failed_at.astimezone(UTC).isoformat()
-                )
-                self.storage.add_event("strategy_analysis_error", record.model_dump_json())
+                if record.error.startswith("superseded by newer local strategy request "):
+                    self.storage.add_event(
+                        "strategy_analysis_superseded",
+                        record.model_dump_json(),
+                    )
+                else:
+                    self.storage.set("strategy_last_error", record.error)
+                    self.storage.set(
+                        "strategy_last_error_at",
+                        record.failed_at.astimezone(UTC).isoformat(),
+                    )
+                    self.storage.add_event(
+                        "strategy_analysis_error",
+                        record.model_dump_json(),
+                    )
             except Exception as exc:
                 self.storage.set("strategy_last_error", _redact(str(exc))[:1000])
                 self.storage.set("strategy_last_error_at", datetime.now(UTC).isoformat())
