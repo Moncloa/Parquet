@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from parquet.config import EtoroConfig, ExecutionConfig, Settings
+from parquet.models import RiskSnapshot
 from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
 from parquet.execution.etoro import (
     EtoroCostComponent,
@@ -227,6 +228,32 @@ def _adapter(tmp_path, client, snapshots):
     return adapter, storage, reconciliation
 
 
+def _autonomous_adapter(tmp_path, client, snapshots):
+    storage = Storage(tmp_path / "state.db")
+    manager = PositionManager(storage)
+    reconciliation = FakeReconciliation(storage, manager, snapshots)
+    settings = Settings(
+        etoro=EtoroConfig(expected_gcid=123),
+        execution=ExecutionConfig(
+            autonomous_enabled=True,
+            autonomous_mode="real",
+            autonomous_real_enabled=True,
+            autonomous_real_max_position_pct=12.5,
+            autonomous_real_max_leverage=2,
+            broker_lookup_attempts=2,
+            broker_lookup_interval_seconds=0,
+        ),
+    )
+    adapter = RealSmallExecutionAdapter(
+        settings=settings,
+        storage=storage,
+        position_manager=manager,
+        reconciliation=reconciliation,  # type: ignore[arg-type]
+        client=client,  # type: ignore[arg-type]
+    )
+    return adapter, storage, reconciliation
+
+
 def _filled_snapshot() -> BrokerPortfolioSnapshot:
     return _snapshot(
         positions=[
@@ -411,3 +438,60 @@ async def test_wrong_agent_portfolio_gcid_blocks_before_post(tmp_path) -> None:
 
     assert reconciliation.calls == 1
     assert storage.latest_execution_attempts() == []
+
+
+@pytest.mark.asyncio
+async def test_autonomous_real_success_requires_no_manual_confirmation(tmp_path) -> None:
+    client = SuccessClient()
+    adapter, storage, reconciliation = _autonomous_adapter(
+        tmp_path,
+        client,
+        [_snapshot(), _filled_snapshot()],
+    )
+    await reconciliation.poll_once(force=True)
+    storage.set_risk_snapshot(
+        RiskSnapshot(
+            as_of=datetime.now(UTC),
+            equity_usd=1_000.0,
+            open_positions=0,
+            trades_today=0,
+            daily_pnl_pct=0.0,
+            weekly_pnl_pct=0.0,
+        )
+    )
+    attempt = _attempt().model_copy(
+        update={"state": ExecutionAttemptState.REAL_PENDING}
+    )
+
+    result = await adapter.execute_autonomous(attempt)
+
+    assert result.state == ExecutionAttemptState.RECONCILED
+    assert result.broker_order_id == "order-1"
+    assert result.broker_position_id == "pos-1"
+    assert client.submitted is not None
+
+
+@pytest.mark.asyncio
+async def test_autonomous_real_enforces_portfolio_exposure_cap(tmp_path) -> None:
+    adapter, storage, reconciliation = _autonomous_adapter(
+        tmp_path,
+        SuccessClient(),
+        [_snapshot()],
+    )
+    await reconciliation.poll_once(force=True)
+    storage.set_risk_snapshot(
+        RiskSnapshot(
+            as_of=datetime.now(UTC),
+            equity_usd=1_000.0,
+            open_positions=0,
+            trades_today=0,
+            daily_pnl_pct=0.0,
+            weekly_pnl_pct=0.0,
+        )
+    )
+    attempt = _attempt(amount=70.0).model_copy(
+        update={"state": ExecutionAttemptState.REAL_PENDING}
+    )
+
+    with pytest.raises(RuntimeError, match="exceeds autonomous real cap"):
+        await adapter.execute_autonomous(attempt)
