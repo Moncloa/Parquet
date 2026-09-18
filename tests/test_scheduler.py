@@ -110,3 +110,17 @@ def test_due_reviews_can_be_filtered_by_source() -> None:
 
     assert [item.reason for item in due] == ["manual-now"]
     assert [item.reason for item in queue.pending()] == ["structural-now"]
+
+
+def test_due_reviews_can_be_filtered_by_exact_key() -> None:
+    now = datetime.now(UTC)
+    queue = ReviewQueue()
+    first = ScheduledReview(now - timedelta(seconds=2), "same", source="manual")
+    second = ScheduledReview(now - timedelta(seconds=1), "same", source="manual")
+    queue.add(first)
+    queue.add(second)
+
+    due = queue.due(now, source="manual", key=second.key)
+
+    assert due == [second]
+    assert queue.pending() == [first]
