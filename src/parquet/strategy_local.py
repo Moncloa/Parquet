@@ -536,46 +536,62 @@ def _decision_to_analysis(
 
     proposal: TradeProposal | None = None
     if decision.proposal is not None:
-        item = decision.proposal
-        if item.symbol.upper() not in allowed:
-            raise RuntimeError(f"local strategy proposed non-shortlisted symbol: {item.symbol}")
-        quote = _quote_for_symbol(original_request, item.symbol)
-        entry_raw = quote.get("ask") if item.side == Side.BUY else quote.get("bid")
+        proposal_decision = decision.proposal
+        if proposal_decision.symbol.upper() not in allowed:
+            raise RuntimeError(
+                f"local strategy proposed non-shortlisted symbol: {proposal_decision.symbol}"
+            )
+        quote = _quote_for_symbol(original_request, proposal_decision.symbol)
+        entry_raw = (
+            quote.get("ask")
+            if proposal_decision.side == Side.BUY
+            else quote.get("bid")
+        )
         if not isinstance(entry_raw, (int, float)) or isinstance(entry_raw, bool):
-            raise RuntimeError(f"missing executable quote for {item.symbol}")
+            raise RuntimeError(
+                f"missing executable quote for {proposal_decision.symbol}"
+            )
         proposal = TradeProposal(
             proposal_id=f"local-{uuid4().hex[:12]}",
-            symbol=item.symbol,
-            side=item.side,
+            symbol=proposal_decision.symbol,
+            side=proposal_decision.side,
             entry=float(entry_raw),
-            stop_loss=item.stop_loss,
-            take_profit=item.take_profit,
-            confidence=item.confidence,
+            stop_loss=proposal_decision.stop_loss,
+            take_profit=proposal_decision.take_profit,
+            confidence=proposal_decision.confidence,
             generated_at=generated_at,
-            expires_at=generated_at + timedelta(minutes=item.ttl_minutes),
-            thesis=[item.rationale],
-            risks=[] if item.risk is None else [item.risk],
+            expires_at=generated_at
+            + timedelta(minutes=proposal_decision.ttl_minutes),
+            thesis=[proposal_decision.rationale],
+            risks=(
+                []
+                if proposal_decision.risk is None
+                else [proposal_decision.risk]
+            ),
         )
 
     watch: WatchItem | None = None
     if decision.watch is not None:
-        item = decision.watch
-        if item.symbol.upper() not in allowed:
-            raise RuntimeError(f"local strategy watched non-shortlisted symbol: {item.symbol}")
+        watch_decision = decision.watch
+        if watch_decision.symbol.upper() not in allowed:
+            raise RuntimeError(
+                f"local strategy watched non-shortlisted symbol: {watch_decision.symbol}"
+            )
         watch = WatchItem(
             watch_id=f"local-watch-{uuid4().hex[:12]}",
-            symbol=item.symbol,
-            bias=item.bias,
+            symbol=watch_decision.symbol,
+            bias=watch_decision.bias,
             trigger=Trigger(
-                type=item.trigger_type,
-                price=item.trigger_price,
+                type=watch_decision.trigger_type,
+                price=watch_decision.trigger_price,
                 timeframe=None,
             ),
-            invalidation=item.invalidation,
-            expires_at=generated_at + timedelta(minutes=item.ttl_minutes),
+            invalidation=watch_decision.invalidation,
+            expires_at=generated_at
+            + timedelta(minutes=watch_decision.ttl_minutes),
             on_trigger=TriggerAction.REASSESS,
             proposal_id=None,
-            rationale=item.rationale,
+            rationale=watch_decision.rationale,
         )
 
     return MarketAnalysis(
