@@ -55,6 +55,14 @@ def validate_keys(settings_path: Path | None) -> int:
     ):
         print("Invalid configuration: autonomous real execution requires etoro.expected_gcid")
         return 2
+    if (
+        settings.execution.autonomous_enabled
+        and settings.execution.autonomous_mode == "real"
+        and settings.execution.autonomous_real_enabled
+        and settings.mode.lower() != "real"
+    ):
+        print("Invalid configuration: autonomous real execution requires global mode=real")
+        return 2
     print("Configuration and key paths are valid")
     return 0
 
