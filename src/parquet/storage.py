@@ -353,6 +353,15 @@ class Storage:
             return None
         return ExecutionAttempt.model_validate_json(str(row[0]))
 
+    def demo_pending_execution_attempts(self, limit: int = 20) -> list[ExecutionAttempt]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT payload FROM execution_attempts "
+                "WHERE state = ? ORDER BY updated_at ASC LIMIT ?",
+                ("DEMO_PENDING", limit),
+            ).fetchall()
+        return [ExecutionAttempt.model_validate_json(str(row[0])) for row in rows]
+
     def latest_execution_attempts(self, limit: int = 20) -> list[ExecutionAttempt]:
         with self._lock:
             rows = self.conn.execute(

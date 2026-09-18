@@ -2,11 +2,28 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from parquet.execution.autonomous import AutonomousExecutionCoordinator
-from parquet.models import MarketObservation, ReviewRequest, TriggerAction, WatchItem
+from parquet.execution.autonomous import (
+    AutonomousExecutionCoordinator,
+    ExecutionAttempt,
+    ExecutionAttemptState,
+)
+from parquet.execution.demo import DemoExecutionAdapter
+from parquet.execution.etoro import EtoroExecutionClient
+from parquet.models import (
+    Bias,
+    MarketAnalysis,
+    MarketObservation,
+    ReviewRequest,
+    Side,
+    Trigger,
+    TriggerAction,
+    TriggerType,
+    WatchItem,
+)
 from parquet.orchestrator import Orchestrator
 from parquet.portfolio import PositionManager
 
@@ -29,6 +46,103 @@ class AutonomousOrchestrator(Orchestrator):
             self.storage,
             self.position_manager,
         )
+        self.demo_execution: DemoExecutionAdapter | None = None
+        if (
+            self.settings.execution.autonomous_mode == "demo"
+            and self.settings.execution.autonomous_demo_enabled
+        ):
+            try:
+                demo_client = EtoroExecutionClient(
+                    api_key=_read_secret(
+                        self.settings.etoro.api_key_file,
+                        "eToro API key",
+                    ),
+                    user_key=_read_secret(
+                        self.settings.etoro.demo_user_key_file,
+                        "eToro demo User key",
+                    ),
+                    base_url=self.settings.etoro.execution_base_url,
+                    identity_base_url=self.settings.etoro.base_url,
+                    environment="demo",
+                )
+            except Exception as exc:
+                self.storage.set("demo_execution_ready", "0")
+                self.storage.set("demo_execution_error", str(exc))
+            else:
+                self.demo_execution = DemoExecutionAdapter(
+                    settings=self.settings,
+                    storage=self.storage,
+                    client=demo_client,
+                )
+                self.storage.set("demo_execution_ready", "1")
+                self.storage.set("demo_execution_error", "")
+
+    def process_analysis(self, analysis: MarketAnalysis) -> None:
+        super().process_analysis(analysis)
+        if not self.settings.execution.autonomous_enabled:
+            return
+        if self.settings.execution.autonomous_mode not in {"shadow", "demo"}:
+            return
+
+        for proposal in analysis.trade_proposals:
+            symbol = proposal.symbol.upper()
+            if symbol in {"AIR", "AIR.PA"}:
+                self.storage.add_event(
+                    "autonomous_proposal_blocked",
+                    json.dumps(
+                        {
+                            "proposal_id": proposal.proposal_id,
+                            "symbol": proposal.symbol,
+                            "reason": "excluded_symbol",
+                        }
+                    ),
+                )
+                continue
+            if proposal.stop_loss is None:
+                self.storage.add_event(
+                    "autonomous_proposal_blocked",
+                    json.dumps(
+                        {
+                            "proposal_id": proposal.proposal_id,
+                            "symbol": proposal.symbol,
+                            "reason": "stop_loss_missing",
+                        }
+                    ),
+                )
+                continue
+
+            is_buy = proposal.side == Side.BUY
+            watch = WatchItem(
+                watch_id=f"auto-exec-{proposal.proposal_id}",
+                symbol=proposal.symbol,
+                bias=Bias.LONG if is_buy else Bias.SHORT,
+                trigger=Trigger(
+                    type=(
+                        TriggerType.PRICE_ABOVE
+                        if is_buy
+                        else TriggerType.PRICE_BELOW
+                    ),
+                    price=proposal.stop_loss,
+                    timeframe=None,
+                ),
+                invalidation=proposal.stop_loss,
+                expires_at=proposal.expires_at,
+                on_trigger=TriggerAction.EXECUTE,
+                proposal_id=proposal.proposal_id,
+                rationale="deterministic bridge from fresh proposal to execution gate",
+            )
+            self.storage.save_watch(analysis.analysis_id, watch)
+            self.storage.add_event(
+                "autonomous_proposal_armed",
+                json.dumps(
+                    {
+                        "analysis_id": analysis.analysis_id,
+                        "proposal_id": proposal.proposal_id,
+                        "watch_id": watch.watch_id,
+                        "symbol": proposal.symbol,
+                    }
+                ),
+            )
 
     def _persist_stream_state(self, current: datetime) -> None:
         super()._persist_stream_state(current)
@@ -317,6 +431,10 @@ class AutonomousOrchestrator(Orchestrator):
         }
         if watch.on_trigger != TriggerAction.EXECUTE:
             return
+        if watch.symbol.upper() in {"AIR", "AIR.PA"}:
+            payload["reasons"] = ["excluded_symbol"]
+            self.storage.add_event("execution_blocked", json.dumps(payload))
+            return
         if watch.proposal_id is None:
             payload["reasons"] = ["proposal_id_missing"]
             self.storage.add_event("execution_rejected", json.dumps(payload))
@@ -355,6 +473,23 @@ class AutonomousOrchestrator(Orchestrator):
             self.storage.add_event("execution_blocked", json.dumps(payload))
             return
 
+        mode = self.settings.execution.autonomous_mode
+        if mode == "real":
+            payload["reasons"] = ["autonomous_real_execution_not_implemented"]
+            self.storage.add_event("execution_blocked", json.dumps(payload))
+            return
+        if mode == "demo" and not self.settings.execution.autonomous_demo_enabled:
+            payload["reasons"] = ["autonomous_demo_execution_disabled"]
+            self.storage.add_event("execution_blocked", json.dumps(payload))
+            return
+        if mode == "demo" and self.demo_execution is None:
+            payload["reasons"] = [
+                self.storage.get("demo_execution_error")
+                or "demo_execution_adapter_unavailable"
+            ]
+            self.storage.add_event("execution_blocked", json.dumps(payload))
+            return
+
         try:
             attempt = self.autonomous_execution.prepare(
                 proposal=proposal,
@@ -368,23 +503,155 @@ class AutonomousOrchestrator(Orchestrator):
             self.storage.add_event("execution_blocked", json.dumps(payload))
             return
 
-        mode = self.settings.execution.autonomous_mode
         if mode == "shadow":
-            attempt = self.autonomous_execution.execute_shadow(
+            if attempt.state == ExecutionAttemptState.PREPARED:
+                attempt = self.autonomous_execution.execute_shadow(
+                    attempt,
+                    now=observation.observed_at,
+                )
+            payload["attempt"] = attempt.model_dump(mode="json")
+            self.storage.add_event(
+                "execution_shadow",
+                json.dumps(payload, default=str),
+            )
+            return
+
+        if attempt.state == ExecutionAttemptState.PREPARED:
+            attempt = self.autonomous_execution.mark_demo_pending(
                 attempt,
                 now=observation.observed_at,
             )
-            payload["attempt"] = attempt.model_dump(mode="json")
-            self.storage.add_event("execution_shadow", json.dumps(payload, default=str))
-            return
-
-        attempt = self.autonomous_execution.mark_demo_pending(
-            attempt,
-            now=observation.observed_at,
-        )
         payload["attempt"] = attempt.model_dump(mode="json")
-        payload["reasons"] = ["demo_broker_adapter_not_implemented"]
-        self.storage.add_event("execution_demo_pending", json.dumps(payload, default=str))
+        self.storage.add_event(
+            "execution_demo_queued",
+            json.dumps(payload, default=str),
+        )
+
+    async def poll_market_once(self, now: datetime | None = None) -> int:
+        processed = await super().poll_market_once(now)
+        await self._process_demo_pending(now)
+        return processed
+
+    async def _process_demo_pending(self, now: datetime | None = None) -> int:
+        if (
+            not self.settings.execution.autonomous_enabled
+            or self.settings.execution.autonomous_mode != "demo"
+            or not self.settings.execution.autonomous_demo_enabled
+            or self.demo_execution is None
+        ):
+            return 0
+
+        pending = self.storage.demo_pending_execution_attempts(limit=1)
+        if not pending:
+            return 0
+
+        attempt = pending[0]
+        proposal = self.storage.get_proposal(attempt.proposal_id)
+        snapshot = self.storage.get_risk_snapshot()
+        if proposal is None or snapshot is None or self.market_client is None:
+            return self._block_demo_attempt(
+                attempt,
+                "proposal_or_risk_or_market_context_unavailable",
+            )
+
+        try:
+            rates = await self.market_client.rates([attempt.instrument_id])
+        except Exception as exc:
+            self.storage.add_event(
+                "demo_execution_preflight_error",
+                json.dumps(
+                    {
+                        "attempt_id": attempt.attempt_id,
+                        "error": repr(exc),
+                    }
+                ),
+            )
+            return 0
+
+        rate = next(
+            (
+                item
+                for item in rates
+                if item.instrument_id == attempt.instrument_id
+            ),
+            None,
+        )
+        if rate is None or rate.bid is None or rate.ask is None:
+            return self._block_demo_attempt(
+                attempt,
+                "fresh_bid_ask_unavailable",
+            )
+
+        price = (
+            rate.last_price
+            if rate.last_price is not None
+            else (rate.bid + rate.ask) / 2
+        )
+        observation = MarketObservation(
+            symbol=proposal.symbol,
+            price=price,
+            observed_at=rate.timestamp,
+            instrument_id=attempt.instrument_id,
+            bid=rate.bid,
+            ask=rate.ask,
+        )
+        decision = self.execution_gate.evaluate(
+            proposal,
+            snapshot,
+            observation,
+            now=datetime.now(UTC),
+        )
+        if not decision.approved or decision.amount_usd is None:
+            reasons = ",".join(decision.reasons) or "gate_rejected"
+            return self._block_demo_attempt(attempt, reasons)
+
+        refreshed = attempt.model_copy(
+            update={
+                "amount_usd": decision.amount_usd,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.storage.save_execution_attempt(refreshed)
+        try:
+            await self.demo_execution.execute(refreshed)
+        except RuntimeError as exc:
+            latest = (
+                self.storage.get_execution_attempt(refreshed.attempt_id)
+                or refreshed
+            )
+            if latest.state == ExecutionAttemptState.DEMO_PENDING:
+                return self._block_demo_attempt(latest, str(exc))
+            self.storage.add_event(
+                "demo_execution_runtime_error",
+                json.dumps(
+                    {
+                        "attempt_id": latest.attempt_id,
+                        "state": latest.state.value,
+                        "error": str(exc),
+                    }
+                ),
+            )
+            return 0
+        return 1
+
+    def _block_demo_attempt(
+        self,
+        attempt: ExecutionAttempt,
+        reason: str,
+    ) -> int:
+        blocked = attempt.model_copy(
+            update={
+                "state": ExecutionAttemptState.BLOCKED,
+                "reason": reason,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        self.storage.save_execution_attempt(blocked)
+        self.storage.add_event(
+            "demo_execution_blocked",
+            blocked.model_dump_json(),
+        )
+        return 1
 
 
 def _filter_stream_candidates(
@@ -438,3 +705,13 @@ def _optional_int(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _read_secret(path: Path, label: str) -> str:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Missing {label} file: {path}") from exc
+    if not value:
+        raise RuntimeError(f"Empty {label} file: {path}")
+    return value

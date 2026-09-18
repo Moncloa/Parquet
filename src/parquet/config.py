@@ -25,6 +25,7 @@ class EtoroConfig(BaseModel):
     enabled: bool = False
     api_key_file: Path = Path("/etc/parquet/etoro_api_key")
     user_key_file: Path = Path("/etc/parquet/etoro_user_key")
+    demo_user_key_file: Path = Path("/etc/parquet/etoro_demo_user_key")
     base_url: str = "https://public-api.etoro.com/api/v1"
     execution_base_url: str = "https://public-api.etoro.com/api/v2"
     expected_gcid: int | None = Field(default=None, gt=0)
@@ -34,6 +35,14 @@ class EtoroConfig(BaseModel):
             "etoro-public:real:write",
             "etoro-public:trade.real:read",
             "etoro-public:trade.real:write",
+        ]
+    )
+    required_demo_scopes: list[str] = Field(
+        default_factory=lambda: [
+            "etoro-public:demo:read",
+            "etoro-public:demo:write",
+            "etoro-public:trade.demo:read",
+            "etoro-public:trade.demo:write",
         ]
     )
     review_symbols: list[str] = Field(
@@ -104,6 +113,9 @@ class ExecutionConfig(BaseModel):
     live_test_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
     autonomous_enabled: bool = False
     autonomous_mode: str = "shadow"
+    autonomous_demo_enabled: bool = False
+    autonomous_demo_max_amount_usd: float = Field(default=25.0, gt=0, le=1000.0)
+    autonomous_demo_max_leverage: int = Field(default=2, ge=1, le=100)
     autonomous_real_enabled: bool = False
     autonomous_real_max_position_pct: float = Field(default=12.5, gt=0, le=100)
     autonomous_real_max_leverage: int = Field(default=2, ge=1, le=100)
@@ -188,6 +200,7 @@ def load_settings(path: Path | None = None) -> Settings:
         "PARQUET_GITHUB_TOKEN_FILE": (["github", "token_file"], str),
         "PARQUET_ETORO_API_KEY_FILE": (["etoro", "api_key_file"], str),
         "PARQUET_ETORO_USER_KEY_FILE": (["etoro", "user_key_file"], str),
+        "PARQUET_ETORO_DEMO_USER_KEY_FILE": (["etoro", "demo_user_key_file"], str),
         "PARQUET_LOCAL_SCREENER_URL": (["local_screener", "base_url"], str),
         "PARQUET_LOCAL_SCREENER_MODEL": (["local_screener", "model"], str),
     }

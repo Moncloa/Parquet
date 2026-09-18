@@ -251,12 +251,17 @@ class EtoroExecutionClient:
         user_key: str,
         base_url: str = "https://public-api.etoro.com/api/v2",
         identity_base_url: str = "https://public-api.etoro.com/api/v1",
+        environment: str = "real",
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        normalized_environment = environment.strip().lower()
+        if normalized_environment not in {"real", "demo"}:
+            raise ValueError("environment must be real or demo")
         self.api_key = api_key
         self.user_key = user_key
         self.base_url = base_url.rstrip("/")
         self.identity_base_url = identity_base_url.rstrip("/")
+        self.environment = normalized_environment
         self.transport = transport
 
     def _headers(self, request_id: str, *, json_body: bool = False) -> dict[str, str]:
@@ -309,7 +314,7 @@ class EtoroExecutionClient:
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
                 response = await client.post(
-                    f"{self.base_url}/trading/info/eligibility",
+                    f"{self.base_url}{self._info_path('eligibility')}",
                     headers=self._headers(request_id, json_body=True),
                     json=payload,
                 )
@@ -389,7 +394,7 @@ class EtoroExecutionClient:
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
                 response = await client.post(
-                    f"{self.base_url}/trading/info/costs",
+                    f"{self.base_url}{self._info_path('costs')}",
                     headers=self._headers(request_id, json_body=True),
                     json=payload,
                 )
@@ -481,7 +486,7 @@ class EtoroExecutionClient:
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
                 response = await client.post(
-                    f"{self.base_url}/trading/execution/orders",
+                    f"{self.base_url}{self._execution_path('orders')}",
                     headers=self._headers(submission_request_id, json_body=True),
                     json=payload,
                 )
@@ -520,7 +525,7 @@ class EtoroExecutionClient:
         try:
             async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
                 response = await client.get(
-                    f"{self.base_url}/trading/info/orders:lookup",
+                    f"{self.base_url}{self._info_path('orders:lookup')}",
                     headers=self._headers(request_id),
                     params=params,
                 )
@@ -531,6 +536,34 @@ class EtoroExecutionClient:
             raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
         body = _json_object(response, request_id, "lookup")
         return EtoroOrderLookupResult(request_id=request_id, response=body)
+
+    async def account_pnl(self) -> dict[str, Any]:
+        request_id = str(uuid4())
+        account_path = (
+            "/trading/info/demo/pnl"
+            if self.environment == "demo"
+            else "/trading/info/real/pnl"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
+                response = await client.get(
+                    f"{self.identity_base_url}{account_path}",
+                    headers=self._headers(request_id),
+                )
+        except httpx.RequestError as exc:
+            raise EtoroExecutionTransportError(repr(exc), request_id) from exc
+
+        if response.is_error:
+            raise EtoroExecutionError(response.status_code, response.text[:1000], request_id)
+        return _json_object(response, request_id, "account pnl")
+
+    def _execution_path(self, resource: str) -> str:
+        root = "/trading/execution/demo" if self.environment == "demo" else "/trading/execution"
+        return f"{root}/{resource}"
+
+    def _info_path(self, resource: str) -> str:
+        root = "/trading/info/demo" if self.environment == "demo" else "/trading/info"
+        return f"{root}/{resource}"
 
     async def open_market_buy(
         self,
