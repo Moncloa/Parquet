@@ -13,7 +13,6 @@ from parquet.execution.etoro import (
     EtoroExecutionClient,
     EtoroExecutionError,
     EtoroExecutionTransportError,
-    EtoroIdentity,
     EtoroOrderLookupResult,
 )
 from parquet.storage import Storage
