@@ -36,9 +36,9 @@ _WIDE_MIN_SPAN_SECONDS = 120.0
 class AutonomousOrchestrator(Orchestrator):
     """Orchestrator variant that routes EXECUTE watches through the durable ledger.
 
-    Autonomous execution is limited to shadow/demo validation. Real broker writes
-    remain unavailable; the coordinator still enforces fresh reconciliation and
-    unresolved-outcome blocking before preparing an attempt.
+    Autonomous execution supports shadow, demo, and explicitly enabled real mode.
+    Real writes remain fail-closed behind reconciliation, risk gates, broker preflight,
+    durable idempotency, and unresolved-outcome blocking.
     """
 
     def __init__(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
