@@ -230,7 +230,7 @@ class LocalStrategyWorker:
             return processed
 
         pending.sort(key=lambda item: item[1].requested_at)
-        latest_path, latest_request = pending[-1]
+        _, latest_request = pending[-1]
         for _, stale_request in pending[:-1]:
             self.queue.write_error(
                 stale_request.request_id,
