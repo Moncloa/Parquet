@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 import pytest
 
 from parquet.config import EtoroConfig, ExecutionConfig, Settings
-from parquet.models import RiskSnapshot
 from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
 from parquet.execution.etoro import (
     EtoroCostComponent,
@@ -18,6 +17,7 @@ from parquet.execution.etoro import (
     EtoroOrderResult,
 )
 from parquet.execution.supervised import RealSmallExecutionAdapter
+from parquet.models import RiskSnapshot
 from parquet.portfolio import (
     BrokerPortfolioSnapshot,
     BrokerPosition,
