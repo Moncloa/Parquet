@@ -41,8 +41,6 @@ class EtoroConfig(BaseModel):
         default_factory=lambda: [
             "etoro-public:demo:read",
             "etoro-public:demo:write",
-            "etoro-public:trade.demo:read",
-            "etoro-public:trade.demo:write",
         ]
     )
     review_symbols: list[str] = Field(
