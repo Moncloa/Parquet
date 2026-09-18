@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from parquet.execution.autonomous import (
     AutonomousExecutionCoordinator,
+    ExecutionAttempt,
     ExecutionAttemptState,
 )
 from parquet.execution.demo import DemoExecutionAdapter
@@ -634,7 +636,7 @@ class AutonomousOrchestrator(Orchestrator):
 
     def _block_demo_attempt(
         self,
-        attempt,
+        attempt: ExecutionAttempt,
         reason: str,
     ) -> int:
         blocked = attempt.model_copy(
@@ -705,7 +707,7 @@ def _optional_int(value: str | None) -> int | None:
         return None
 
 
-def _read_secret(path, label: str) -> str:
+def _read_secret(path: Path, label: str) -> str:
     try:
         value = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError as exc:
