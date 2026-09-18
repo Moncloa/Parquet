@@ -155,7 +155,7 @@ def run_request_review_now(settings_path: Path | None, reason: str) -> int:
                 source="manual",
             )
         )
-        posted = await orchestrator.post_due_reviews(now=current)
+        posted = await orchestrator.post_due_reviews(now=current, source="manual")
         return posted, current
 
     posted, requested_at = asyncio.run(request())
