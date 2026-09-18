@@ -4,12 +4,16 @@ from parquet.autonomous_orchestrator import AutonomousOrchestrator
 from parquet.config import EtoroConfig, ExecutionConfig, Settings
 from parquet.execution.autonomous import ExecutionAttemptState
 from parquet.models import (
+    Bias,
     MarketAnalysis,
     MarketObservation,
     RiskSnapshot,
     Side,
     TradeProposal,
+    Trigger,
     TriggerAction,
+    TriggerType,
+    WatchItem,
 )
 from parquet.portfolio import ReconciliationReport, ReconciliationState
 
@@ -106,3 +110,62 @@ def test_airbus_proposal_is_never_armed(tmp_path) -> None:
     orchestrator.process_analysis(_analysis(now, _proposal(now, symbol="AIR.PA")))
 
     assert orchestrator.storage.active_watches(now) == []
+
+
+def test_execute_watch_cannot_cross_from_shadow_to_real(tmp_path) -> None:
+    now = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
+    settings = Settings(
+        mode="real",
+        state_db=tmp_path / "state.db",
+        etoro=EtoroConfig(enabled=False),
+        execution=ExecutionConfig(
+            autonomous_enabled=True,
+            autonomous_mode="real",
+            autonomous_real_enabled=False,
+        ),
+    )
+    orchestrator = AutonomousOrchestrator(settings)
+    orchestrator.storage.set_reconciliation_report(
+        ReconciliationReport(
+            as_of=now,
+            state=ReconciliationState.SYNCED,
+            trading_enabled=True,
+        )
+    )
+    orchestrator.storage.set_risk_snapshot(
+        RiskSnapshot(
+            as_of=now,
+            equity_usd=1_000.0,
+            open_positions=0,
+            trades_today=0,
+            daily_pnl_pct=0.0,
+            weekly_pnl_pct=0.0,
+        )
+    )
+    proposal = _proposal(now)
+    orchestrator.storage.save_proposal("shadow-analysis", proposal)
+    watch = WatchItem(
+        watch_id="shadow-watch",
+        symbol=proposal.symbol,
+        bias=Bias.LONG,
+        trigger=Trigger(type=TriggerType.PRICE_ABOVE, price=99.0),
+        invalidation=98.0,
+        expires_at=now + timedelta(minutes=5),
+        on_trigger=TriggerAction.EXECUTE,
+        proposal_id=proposal.proposal_id,
+        execution_mode="shadow",
+    )
+
+    orchestrator._handle_execute_watch(
+        watch,
+        MarketObservation(
+            symbol=proposal.symbol,
+            price=100.0,
+            observed_at=now + timedelta(seconds=1),
+            instrument_id=32,
+            bid=99.99,
+            ask=100.01,
+        ),
+    )
+
+    assert orchestrator.storage.latest_execution_attempts() == []
