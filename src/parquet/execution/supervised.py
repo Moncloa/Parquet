@@ -286,6 +286,8 @@ class RealSmallExecutionAdapter:
         config = self.settings.execution
         if not config.autonomous_enabled:
             raise RuntimeError("Autonomous execution is disabled")
+        if self.settings.mode.lower() != "real":
+            raise RuntimeError("Autonomous real execution requires global mode=real")
         if config.autonomous_mode != "real":
             raise RuntimeError("Autonomous real execution requires autonomous_mode=real")
         if not config.autonomous_real_enabled:
