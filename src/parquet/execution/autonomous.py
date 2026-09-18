@@ -18,6 +18,7 @@ class ExecutionAttemptState(StrEnum):
     ACKNOWLEDGED = "ACKNOWLEDGED"
     SHADOW_EXECUTED = "SHADOW_EXECUTED"
     DEMO_PENDING = "DEMO_PENDING"
+    REAL_PENDING = "REAL_PENDING"
     REJECTED = "REJECTED"
     BLOCKED = "BLOCKED"
     OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
@@ -125,6 +126,18 @@ class AutonomousExecutionCoordinator:
             raise RuntimeError(f"Execution attempt is not PREPARED: {attempt.state}")
         updated = attempt.model_copy(
             update={"state": ExecutionAttemptState.DEMO_PENDING, "updated_at": current}
+        )
+        self.storage.save_execution_attempt(updated)
+        return updated
+
+    def mark_real_pending(
+        self, attempt: ExecutionAttempt, *, now: datetime | None = None
+    ) -> ExecutionAttempt:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        if attempt.state != ExecutionAttemptState.PREPARED:
+            raise RuntimeError(f"Execution attempt is not PREPARED: {attempt.state}")
+        updated = attempt.model_copy(
+            update={"state": ExecutionAttemptState.REAL_PENDING, "updated_at": current}
         )
         self.storage.save_execution_attempt(updated)
         return updated
