@@ -545,8 +545,6 @@ def _decision_to_analysis(
     if decision.action in {LocalAction.BUY, LocalAction.SELL}:
         if decision.symbol is None or decision.stop is None:
             raise RuntimeError("BUY/SELL decision requires symbol and stop")
-        if decision.trigger is not None:
-            raise RuntimeError("BUY/SELL decision must not set trigger")
         side = Side.BUY if decision.action == LocalAction.BUY else Side.SELL
         quote = _quote_for_symbol(original_request, decision.symbol)
         entry_raw = quote.get("ask") if side == Side.BUY else quote.get("bid")
@@ -572,8 +570,6 @@ def _decision_to_analysis(
     elif decision.action in {LocalAction.WATCH_BUY, LocalAction.WATCH_SELL}:
         if decision.symbol is None or decision.trigger is None:
             raise RuntimeError("WATCH decision requires symbol and trigger")
-        if decision.target is not None:
-            raise RuntimeError("WATCH decision must not set target")
         is_buy = decision.action == LocalAction.WATCH_BUY
         watch = WatchItem(
             watch_id=f"local-watch-{uuid4().hex[:12]}",
