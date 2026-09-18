@@ -86,3 +86,27 @@ def test_structural_review_is_not_duplicated() -> None:
     ensure_structural_reviews(queue, [rule], now)
     ensure_structural_reviews(queue, [rule], now)
     assert len(queue.pending()) == 1
+
+
+def test_due_reviews_can_be_filtered_by_source() -> None:
+    now = datetime.now(UTC)
+    queue = ReviewQueue()
+    queue.add(
+        ScheduledReview(
+            now - timedelta(seconds=2),
+            "manual-now",
+            source="manual",
+        )
+    )
+    queue.add(
+        ScheduledReview(
+            now - timedelta(seconds=1),
+            "structural-now",
+            source="structural",
+        )
+    )
+
+    due = queue.due(now, source="manual")
+
+    assert [item.reason for item in due] == ["manual-now"]
+    assert [item.reason for item in queue.pending()] == ["structural-now"]
