@@ -9,7 +9,7 @@ from parquet.strategy_local import (
     LocalStrategyDecision,
     LocalStrategySettings,
     LocalStrategyWorker,
-    _compact_local_strategy_request,
+    _local_prompt_data,
 )
 
 
@@ -24,115 +24,126 @@ def test_local_strategy_settings_reject_non_loopback(monkeypatch: pytest.MonkeyP
         LocalStrategySettings.from_env()
 
 
-def test_local_strategy_request_uses_screener_shortlist_and_metrics_only() -> None:
+def test_local_prompt_data_uses_two_fresh_qwen_candidates_and_aliases() -> None:
     now = datetime.now(UTC)
     request = ReviewRequest(
-        request_id="compact-local-1",
+        request_id="flat-local-1",
         requested_at=now,
         reason="test",
-        symbols=["AAA", "BBB", "CCC"],
+        symbols=["AAA", "BBB", "CCC", "AIR.PA"],
         context={
             "market_data": {
-                "provider": "etoro",
-                "captured_at": now.isoformat(),
                 "quotes": {
-                    "AAA": {"bid": 10.0, "ask": 10.1, "stale": False, "extra": "drop"},
-                    "BBB": {"bid": 20.0, "ask": 20.1, "stale": False},
-                    "CCC": {"bid": 30.0, "ask": 30.1, "stale": False},
+                    "AAA": {
+                        "bid": 10.0,
+                        "ask": 10.1,
+                        "age_seconds": 1.2,
+                        "stale": False,
+                    },
+                    "BBB": {
+                        "bid": 20.0,
+                        "ask": 20.1,
+                        "age_seconds": 1.0,
+                        "stale": False,
+                    },
+                    "CCC": {
+                        "bid": 30.0,
+                        "ask": 30.1,
+                        "age_seconds": 80.0,
+                        "stale": True,
+                    },
+                    "AIR.PA": {
+                        "bid": 200.0,
+                        "ask": 200.2,
+                        "stale": False,
+                    },
                 },
                 "history": {
-                    symbol: {
-                        "sample_count": 20,
-                        "span_minutes": 20.0,
-                        "points": [{"t": str(i), "p": float(i + 1)} for i in range(10)],
-                        "metrics": {"change_pct_5m": 1.0, "high_60m": 21.0},
-                    }
-                    for symbol in ("AAA", "BBB", "CCC")
+                    "AAA": {
+                        "metrics": {
+                            "change_pct_5m": 1.0,
+                            "change_pct_15m": 1.5,
+                            "high_60m": 10.2,
+                            "low_60m": 9.8,
+                            "ignored": 999,
+                        }
+                    },
+                    "BBB": {
+                        "metrics": {
+                            "change_pct_5m": 2.0,
+                            "range_pct_60m": 3.0,
+                        }
+                    },
                 },
                 "wide_scanner": {
-                    "source": "live_service_scanner",
-                    "ranking": "test",
-                    "subscribed_instruments": 500,
                     "candidates": [
                         {
                             "symbol": "AAA",
                             "score": 80.0,
-                            "change_pct_5m": 1.1,
+                            "directional_efficiency": 0.7,
+                            "persistence": 0.8,
                             "points": [1, 2, 3],
-                            "name": "drop",
                         },
                         {
                             "symbol": "BBB",
                             "score": 90.0,
-                            "change_pct_5m": 1.5,
-                            "points": [4, 5, 6],
+                            "change_pct_5m": 2.0,
+                            "spread_bps": 4.0,
                         },
-                        {
-                            "symbol": "CCC",
-                            "score": 70.0,
-                            "change_pct_5m": 0.5,
-                            "points": [7, 8, 9],
-                        },
+                        {"symbol": "CCC", "score": 95.0},
+                        {"symbol": "AIR.PA", "score": 99.0},
                     ],
                     "local_screener": {
-                        "status": "ok",
-                        "model": "qwen3.5:4b",
-                        "telemetry": {"prompt_tokens": 1234},
                         "shortlist": [
+                            {
+                                "symbol": "CCC",
+                                "classification": "MOMENTUM",
+                                "score": 95,
+                                "reason": "stale candidate",
+                            },
+                            {
+                                "symbol": "AIR.PA",
+                                "classification": "MOMENTUM",
+                                "score": 94,
+                                "reason": "excluded",
+                            },
                             {
                                 "symbol": "BBB",
                                 "classification": "MOMENTUM",
-                                "score": 88,
+                                "score": 90,
                                 "reason": "clean continuation",
                             },
                             {
                                 "symbol": "AAA",
                                 "classification": "WATCH",
-                                "score": 65,
-                                "reason": "interesting",
+                                "score": 70,
+                                "reason": "secondary setup",
                             },
-                        ],
+                        ]
                     },
                 },
             },
-            "risk_snapshot": {"equity_usd": 10000.0, "open_positions": 1},
-            "unrelated": {"large": "drop me"},
+            "risk_snapshot": {"equity_usd": 10000.0},
         },
     )
 
-    compact = _compact_local_strategy_request(
-        request,
-        LocalStrategySettings(max_candidates=2),
-    )
+    data, selected = _local_prompt_data(request, 2)
 
-    assert compact.symbols == ["BBB", "AAA"]
-    assert set(compact.context) == {"market_data", "risk_snapshot"}
-    market_data = compact.context["market_data"]
-    assert isinstance(market_data, dict)
-    assert list(market_data["quotes"]) == ["AAA", "BBB"]
-    assert "extra" not in market_data["quotes"]["AAA"]
-    assert list(market_data["history"]) == ["AAA", "BBB"]
-    assert all(
-        "points" not in value
-        for value in market_data["history"].values()
-        if isinstance(value, dict)
-    )
-
-    scanner = market_data["wide_scanner"]
-    assert isinstance(scanner, dict)
-    assert scanner["selected_for_local_strategy"] == ["BBB", "AAA"]
-    assert "subscribed_instruments" not in scanner
-    assert [item["symbol"] for item in scanner["candidates"]] == ["AAA", "BBB"]
-    assert all("points" not in item and "name" not in item for item in scanner["candidates"])
-
-    local_screener = scanner["local_screener"]
-    assert isinstance(local_screener, dict)
-    assert "telemetry" not in local_screener
-    assert [item["symbol"] for item in local_screener["shortlist"]] == ["BBB", "AAA"]
+    assert selected == ["BBB", "AAA"]
+    candidates = data["c"]
+    assert isinstance(candidates, list)
+    assert [item["s"] for item in candidates] == ["BBB", "AAA"]
+    assert candidates[0]["b"] == 20.0
+    assert candidates[0]["a"] == 20.1
+    assert candidates[0]["h"] == {"c5": 2.0, "range60": 3.0}
+    assert candidates[0]["r"] == {"score": 90.0, "c5": 2.0, "spread": 4.0}
+    assert candidates[0]["q"]["class"] == "MOMENTUM"
+    assert candidates[1]["h"]["c15"] == 1.5
+    assert "ignored" not in candidates[1]["h"]
 
 
 @pytest.mark.asyncio
-async def test_local_strategy_worker_maps_compact_decision_to_market_analysis(tmp_path) -> None:
+async def test_local_strategy_worker_maps_flat_buy_to_market_analysis(tmp_path) -> None:
     now = datetime.now(UTC)
     request = ReviewRequest(
         request_id="local-request-1",
@@ -141,31 +152,32 @@ async def test_local_strategy_worker_maps_compact_decision_to_market_analysis(tm
         symbols=["AAA"],
         context={
             "market_data": {
-                "provider": "etoro",
-                "captured_at": now.isoformat(),
                 "quotes": {
                     "AAA": {
                         "bid": 10.0,
                         "ask": 10.1,
-                        "timestamp": now.isoformat(),
                         "age_seconds": 0.0,
                         "stale": False,
                     }
                 },
                 "history": {
                     "AAA": {
-                        "sample_count": 20,
-                        "span_minutes": 20.0,
-                        "metrics": {"change_pct_5m": 1.0},
+                        "metrics": {
+                            "change_pct_5m": 1.0,
+                            "high_60m": 10.2,
+                            "low_60m": 9.8,
+                        }
                     }
                 },
                 "wide_scanner": {
-                    "source": "live_service_scanner",
-                    "ranking": "test",
-                    "candidates": [{"symbol": "AAA", "score": 90.0}],
+                    "candidates": [
+                        {
+                            "symbol": "AAA",
+                            "score": 90.0,
+                            "directional_efficiency": 0.8,
+                        }
+                    ],
                     "local_screener": {
-                        "status": "ok",
-                        "model": "qwen3.5:4b",
                         "shortlist": [
                             {
                                 "symbol": "AAA",
@@ -173,7 +185,7 @@ async def test_local_strategy_worker_maps_compact_decision_to_market_analysis(tm
                                 "score": 90,
                                 "reason": "clean continuation",
                             }
-                        ],
+                        ]
                     },
                 },
             }
@@ -181,35 +193,30 @@ async def test_local_strategy_worker_maps_compact_decision_to_market_analysis(tm
     )
     decision = LocalStrategyDecision.model_validate(
         {
-            "market_regime": "momentum",
-            "summary": "AAA has the cleanest supplied setup.",
-            "proposal": {
-                "symbol": "AAA",
-                "side": "BUY",
-                "stop_loss": 9.9,
-                "take_profit": 10.4,
-                "confidence": 0.72,
-                "ttl_minutes": 10,
-                "rationale": "positive short-term momentum",
-                "risk": "momentum can fade",
-            },
-            "watch": None,
-            "next_review_minutes": 5,
+            "action": "BUY",
+            "symbol": "AAA",
+            "stop": 9.9,
+            "target": 10.4,
+            "trigger": None,
+            "confidence": 0.72,
+            "reason": "positive short-term momentum",
         }
     )
 
     async def handler(http_request: httpx.Request) -> httpx.Response:
         assert http_request.url.path == "/api/chat"
         payload = __import__("json").loads(http_request.content)
-        assert payload["options"]["num_ctx"] == 4096
-        assert payload["options"]["num_predict"] == 384
+        assert payload["options"]["num_ctx"] == 3072
+        assert payload["options"]["num_predict"] == 224
+        assert len(payload["messages"][1]["content"]) < 2000
         return httpx.Response(
             200,
             json={
                 "message": {"role": "assistant", "content": decision.model_dump_json()},
-                "prompt_eval_count": 180,
-                "eval_count": 95,
-                "eval_duration": 47_500_000_000,
+                "prompt_eval_count": 700,
+                "eval_count": 110,
+                "prompt_eval_duration": 35_000_000_000,
+                "eval_duration": 30_000_000_000,
             },
         )
 
@@ -221,6 +228,7 @@ async def test_local_strategy_worker_maps_compact_decision_to_market_analysis(tm
 
     assert analysis.review_request_id == request.request_id
     assert analysis.sources == []
+    assert analysis.market_regime == "local_compact"
     assert len(analysis.trade_proposals) == 1
     proposal = analysis.trade_proposals[0]
     assert proposal.symbol == "AAA"
@@ -228,6 +236,39 @@ async def test_local_strategy_worker_maps_compact_decision_to_market_analysis(tm
     assert proposal.entry == 10.1
     assert proposal.stop_loss == 9.9
     assert proposal.take_profit == 10.4
-    assert worker._last_inference["prompt_tokens"] == 180
-    assert worker._last_inference["eval_tokens"] == 95
-    assert worker._last_inference["eval_tokens_per_second"] == 2.0
+    assert worker._last_inference["prompt_tokens"] == 700
+    assert worker._last_inference["eval_tokens"] == 110
+
+
+@pytest.mark.asyncio
+async def test_local_strategy_worker_skips_ollama_without_fresh_candidates(tmp_path) -> None:
+    now = datetime.now(UTC)
+    request = ReviewRequest(
+        request_id="local-empty-1",
+        requested_at=now,
+        reason="test",
+        symbols=["AAA"],
+        context={
+            "market_data": {
+                "quotes": {
+                    "AAA": {
+                        "bid": 10.0,
+                        "ask": 10.1,
+                        "stale": True,
+                    }
+                }
+            }
+        },
+    )
+
+    worker = LocalStrategyWorker(
+        LocalStrategySettings(queue_dir=tmp_path),
+        transport=httpx.MockTransport(
+            lambda _: pytest.fail("Ollama should not be called")
+        ),
+    )
+    analysis = await worker.analyze(request)
+
+    assert analysis.trade_proposals == []
+    assert analysis.watch == []
+    assert worker._last_inference["status"] == "skipped_no_fresh_candidates"
