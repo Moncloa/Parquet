@@ -26,10 +26,18 @@ class FakeOrchestrator:
     def add_review(self, review) -> None:
         self.reviews.append(review)
 
-    async def post_due_reviews(self, now=None) -> int:
+    async def post_due_reviews(
+        self,
+        now=None,
+        *,
+        source=None,
+        review_key=None,
+    ) -> int:
         assert len(self.reviews) == 1
         assert self.reviews[0].source == "manual"
         assert self.reviews[0].reason == "manual_opportunity_scan"
+        assert source == "manual"
+        assert review_key == self.reviews[0].key
         return self.posted_count
 
 
@@ -71,14 +79,11 @@ def test_request_review_now_posts_one_safe_review(monkeypatch, capsys) -> None:
     assert "No broker order was sent." in out
 
 
-def test_request_review_now_allows_other_due_reviews(monkeypatch, capsys) -> None:
-    orchestrator = FakeOrchestrator(posted_count=3)
+def test_request_review_now_requires_exactly_one_manual_review(monkeypatch) -> None:
+    orchestrator = FakeOrchestrator(posted_count=2)
     _install_fakes(monkeypatch, orchestrator)
 
-    result = run_request_review_now(None, "manual_opportunity_scan")
+    import pytest
 
-    assert result == 0
-    out = capsys.readouterr().out
-    assert "Manual review request posted" in out
-    assert "additional_due_reviews_posted: 2" in out
-    assert "No broker order was sent." in out
+    with pytest.raises(RuntimeError, match="exactly one manual review request"):
+        run_request_review_now(None, "manual_opportunity_scan")
