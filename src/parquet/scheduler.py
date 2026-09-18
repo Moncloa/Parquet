@@ -32,9 +32,19 @@ class ReviewQueue:
     def remove(self, review: ScheduledReview) -> None:
         self._items.pop(review.key, None)
 
-    def due(self, now: datetime | None = None) -> list[ScheduledReview]:
+    def due(
+        self,
+        now: datetime | None = None,
+        *,
+        source: str | None = None,
+    ) -> list[ScheduledReview]:
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        due = [item for item in self._items.values() if item.at.astimezone(UTC) <= current]
+        due = [
+            item
+            for item in self._items.values()
+            if item.at.astimezone(UTC) <= current
+            and (source is None or item.source == source)
+        ]
         for item in due:
             self.remove(item)
         return sorted(due, key=lambda item: item.at)
