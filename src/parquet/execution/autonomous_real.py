@@ -100,6 +100,14 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
         snapshot = self.storage.get_risk_snapshot()
         if snapshot is None or snapshot.equity_usd is None:
             raise RuntimeError("Real execution blocked: risk equity is unavailable")
+        minimum_capital = (
+            snapshot.equity_usd * config.autonomous_real_min_position_pct / 100
+        )
+        if attempt.amount_usd + 1e-9 < minimum_capital:
+            raise RuntimeError(
+                f"Amount {attempt.amount_usd:.2f} is below autonomous real minimum "
+                f"{minimum_capital:.2f} ({config.autonomous_real_min_position_pct:.2f}% equity)"
+            )
         maximum_capital = (
             snapshot.equity_usd * config.autonomous_real_max_position_pct / 100
         )
