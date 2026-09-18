@@ -97,6 +97,12 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
         if attempt.settlement_type is None or not attempt.settlement_type.strip():
             raise RuntimeError("Real execution blocked: prepared ticket has no settlement_type")
 
+        if attempt.leverage > config.autonomous_real_max_leverage:
+            raise RuntimeError(
+                f"Leverage x{attempt.leverage} exceeds autonomous real cap "
+                f"x{config.autonomous_real_max_leverage}"
+            )
+
         snapshot = self.storage.get_risk_snapshot()
         if snapshot is None or snapshot.equity_usd is None:
             raise RuntimeError("Real execution blocked: risk equity is unavailable")
@@ -116,8 +122,4 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
                 f"Amount {attempt.amount_usd:.2f} exceeds autonomous real cap "
                 f"{maximum_capital:.2f} ({config.autonomous_real_max_position_pct:.2f}% equity)"
             )
-        if attempt.leverage > config.autonomous_real_max_leverage:
-            raise RuntimeError(
-                f"Leverage x{attempt.leverage} exceeds autonomous real cap "
-                f"x{config.autonomous_real_max_leverage}"
-            )
+
