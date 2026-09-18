@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
 from parquet.portfolio import (
     BrokerPortfolioSnapshot,
     BrokerPosition,
@@ -110,3 +111,125 @@ def test_reconciliation_error_blocks_trading(tmp_path) -> None:
     assert report.trading_enabled is False
     with pytest.raises(RuntimeError, match="BROKER_RECONCILIATION_ERROR"):
         manager.assert_trading_enabled(max_age_seconds=60)
+
+
+def test_broker_stop_loss_worse_than_attempt_blocks_reconciliation(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    manager = PositionManager(storage)
+    opened = datetime.now(UTC)
+
+    attempt = ExecutionAttempt(
+        attempt_id="attempt-sedg",
+        proposal_id="proposal-sedg",
+        watch_id="watch-sedg",
+        symbol="SEDG",
+        instrument_id=1969,
+        side="BUY",
+        amount_usd=10.0,
+        leverage=1,
+        settlement_type="real",
+        stop_loss=33.51,
+        take_profit=34.21,
+        created_at=opened,
+        updated_at=opened,
+        state=ExecutionAttemptState.RECONCILED,
+        broker_position_id="3581638192",
+    )
+    storage.save_execution_attempt(attempt)
+    manager.record_execution_position(
+        ManagedPosition(
+            local_id=attempt.attempt_id,
+            broker_position_id="3581638192",
+            proposal_id=attempt.proposal_id,
+            instrument_id=1969,
+            symbol="SEDG",
+            side="BUY",
+            opened_at=opened,
+            amount_usd=10.0,
+            leverage=1.0,
+            stop_loss_rate=27.10,
+            take_profit_rate=34.21,
+        )
+    )
+
+    report = manager.reconcile(
+        snapshot(
+            BrokerPosition(
+                position_id="3581638192",
+                instrument_id=1969,
+                symbol="SEDG",
+                side="BUY",
+                amount_usd=10.0,
+                leverage=1.0,
+                open_rate=33.87,
+                stop_loss_rate=27.10,
+                take_profit_rate=34.21,
+            ),
+            at=opened + timedelta(seconds=5),
+        )
+    )
+
+    assert report.state == ReconciliationState.BLOCKED
+    assert report.trading_enabled is False
+    assert [issue.code for issue in report.issues] == [
+        "BROKER_STOP_LOSS_MISMATCH"
+    ]
+    assert "33.51" in report.issues[0].detail
+    assert "27.1" in report.issues[0].detail
+
+
+def test_broker_more_protective_stop_remains_synced(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    manager = PositionManager(storage)
+    opened = datetime.now(UTC)
+
+    attempt = ExecutionAttempt(
+        attempt_id="attempt-long",
+        proposal_id="proposal-long",
+        watch_id="watch-long",
+        symbol="TEST",
+        instrument_id=100,
+        side="BUY",
+        amount_usd=10.0,
+        leverage=1,
+        settlement_type="real",
+        stop_loss=90.0,
+        take_profit=110.0,
+        created_at=opened,
+        updated_at=opened,
+        state=ExecutionAttemptState.RECONCILED,
+        broker_position_id="broker-long",
+    )
+    storage.save_execution_attempt(attempt)
+    manager.record_execution_position(
+        ManagedPosition(
+            local_id=attempt.attempt_id,
+            broker_position_id="broker-long",
+            proposal_id=attempt.proposal_id,
+            instrument_id=100,
+            symbol="TEST",
+            side="BUY",
+            opened_at=opened,
+            stop_loss_rate=90.0,
+        )
+    )
+
+    report = manager.reconcile(
+        snapshot(
+            BrokerPosition(
+                position_id="broker-long",
+                instrument_id=100,
+                symbol="TEST",
+                side="BUY",
+                amount_usd=10.0,
+                leverage=1.0,
+                open_rate=100.0,
+                stop_loss_rate=91.0,
+                take_profit_rate=110.0,
+            ),
+            at=opened + timedelta(seconds=5),
+        )
+    )
+
+    assert report.state == ReconciliationState.SYNCED
+    assert report.trading_enabled is True
