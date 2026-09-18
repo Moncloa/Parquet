@@ -174,6 +174,7 @@ class AutonomousOrchestrator(Orchestrator):
                 expires_at=proposal.expires_at,
                 on_trigger=TriggerAction.EXECUTE,
                 proposal_id=proposal.proposal_id,
+                execution_mode=self.settings.execution.autonomous_mode,
                 rationale="deterministic bridge from fresh proposal to execution gate",
             )
             self.storage.save_watch(analysis.analysis_id, watch)
@@ -475,6 +476,13 @@ class AutonomousOrchestrator(Orchestrator):
             "observed_at": observation.observed_at.isoformat(),
         }
         if watch.on_trigger != TriggerAction.EXECUTE:
+            return
+        current_mode = self.settings.execution.autonomous_mode
+        if watch.execution_mode != current_mode:
+            payload["reasons"] = [
+                f"execution_mode_mismatch:{watch.execution_mode or 'unset'}->{current_mode}"
+            ]
+            self.storage.add_event("execution_blocked", json.dumps(payload))
             return
         if watch.symbol.upper() in {"AIR", "AIR.PA"}:
             payload["reasons"] = ["excluded_symbol"]
