@@ -367,7 +367,7 @@ def _local_prompt_data(
 
         candidate: dict[str, object] = {"s": symbol, "b": bid, "a": ask}
         age = quote.get("age_seconds")
-        if _finite_number(age):
+        if isinstance(age, (int, float)) and not isinstance(age, bool):
             candidate["age"] = round(float(age), 2)
 
         history = market_data.get("history")
@@ -550,7 +550,11 @@ def _decision_to_analysis(
         side = Side.BUY if decision.action == LocalAction.BUY else Side.SELL
         quote = _quote_for_symbol(original_request, decision.symbol)
         entry_raw = quote.get("ask") if side == Side.BUY else quote.get("bid")
-        if not _positive_number(entry_raw):
+        if (
+            not isinstance(entry_raw, (int, float))
+            or isinstance(entry_raw, bool)
+            or entry_raw <= 0
+        ):
             raise RuntimeError(f"missing executable quote for {decision.symbol}")
         proposal = TradeProposal(
             proposal_id=f"local-{uuid4().hex[:12]}",
