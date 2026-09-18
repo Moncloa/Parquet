@@ -9,9 +9,9 @@ from parquet.enhanced_orchestrator import (
 )
 from parquet.execution.autonomous_real import AutonomousRealExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
+from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.models import MarketObservation, Side, TradeProposal, TriggerAction
 from parquet.reconciliation import ReconciliationService
-from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.tickets import validate_what_if_costs
 
 _EXCLUDED_AUTONOMOUS_SYMBOLS = {"AIR", "AIR.PA"}
