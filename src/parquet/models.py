@@ -77,6 +77,7 @@ class WatchItem(StrictOutputModel):
     expires_at: datetime
     on_trigger: TriggerAction = TriggerAction.REASSESS
     proposal_id: str | None = Field(default=None, min_length=1)
+    execution_mode: str | None = None
     rationale: str | None = None
 
 
