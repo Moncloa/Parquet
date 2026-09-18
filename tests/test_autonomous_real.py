@@ -12,9 +12,6 @@ from parquet.portfolio import PositionManager
 from parquet.storage import Storage
 
 
-
-
-
 def _eligibility(*, leverages: list[int] | None = None) -> EtoroEligibilityResult:
     return EtoroEligibilityResult(
         request_id="eligibility-autonomous-real",
