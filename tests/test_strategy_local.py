@@ -9,6 +9,7 @@ from parquet.strategy_local import (
     LocalStrategyDecision,
     LocalStrategySettings,
     LocalStrategyWorker,
+    _decision_to_analysis,
     _local_prompt_data,
 )
 
@@ -197,7 +198,7 @@ async def test_local_strategy_worker_maps_flat_buy_to_market_analysis(tmp_path) 
             "symbol": "AAA",
             "stop": 9.9,
             "target": 10.4,
-            "trigger": None,
+            "trigger": 10.2,
             "confidence": 0.72,
             "reason": "positive short-term momentum",
         }
@@ -272,3 +273,49 @@ async def test_local_strategy_worker_skips_ollama_without_fresh_candidates(tmp_p
     assert analysis.trade_proposals == []
     assert analysis.watch == []
     assert worker._last_inference["status"] == "skipped_no_fresh_candidates"
+
+
+def test_local_strategy_watch_ignores_irrelevant_target() -> None:
+    now = datetime.now(UTC)
+    request = ReviewRequest(
+        request_id="local-watch-1",
+        requested_at=now,
+        reason="test",
+        symbols=["AAA"],
+        context={
+            "market_data": {
+                "quotes": {
+                    "AAA": {
+                        "bid": 10.0,
+                        "ask": 10.1,
+                        "age_seconds": 0.0,
+                        "stale": False,
+                    }
+                }
+            }
+        },
+    )
+    decision = LocalStrategyDecision.model_validate(
+        {
+            "action": "WATCH_BUY",
+            "symbol": "AAA",
+            "stop": 9.8,
+            "target": 10.6,
+            "trigger": 10.2,
+            "confidence": 0.65,
+            "reason": "wait for breakout",
+        }
+    )
+
+    analysis = _decision_to_analysis(
+        decision,
+        original_request=request,
+        selected_symbols=["AAA"],
+        generated_at=now,
+    )
+
+    assert analysis.trade_proposals == []
+    assert len(analysis.watch) == 1
+    assert analysis.watch[0].symbol == "AAA"
+    assert analysis.watch[0].trigger.price == 10.2
+    assert analysis.watch[0].invalidation == 9.8
