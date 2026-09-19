@@ -218,7 +218,18 @@ curl -fsS http://127.0.0.1:8787/status
 
 When strategy is enabled, `/health` also exposes worker heartbeat/readiness, pending requests, last strategy analysis ID and last error. It never exposes Codex credentials.
 
-The positions dashboard is available at:
+The operations dashboard is the main read-only runtime console:
+
+```text
+GET /
+GET /operations.json
+```
+
+It summarizes runtime revision/mode, equity and current P/L, recent and pending
+reviews, NO TRADE decisions, deterministic execution rejections, active
+positions/watches, and reconciliation/strategy health.
+
+The original positions-only view remains available at:
 
 ```text
 GET /positions
