@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from parquet.config import Settings
+from parquet.controls import latest_manual_review_status
 from parquet.dashboard import position_payload
 from parquet.models import MarketAnalysis
 from parquet.strategy import StrategyQueue
@@ -101,8 +102,10 @@ def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str
                 if isinstance(worker.get("providers"), dict)
                 else {}
             ),
-            "active_request_id": worker.get("active_request_id"),
-            "active_provider": worker.get("active_provider"),
+            "latest_review": latest_manual_review_status(
+                storage,
+                settings.strategy.queue_dir,
+            ),
         },
         "pending_reviews": [
             {
