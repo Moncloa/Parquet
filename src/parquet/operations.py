@@ -102,6 +102,10 @@ def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str
                 if isinstance(worker.get("providers"), dict)
                 else {}
             ),
+            "operational": {
+                "enabled": _operational_controls_enabled(settings),
+                "mode": settings.execution.autonomous_mode,
+            },
             "latest_review": latest_manual_review_status(
                 storage,
                 settings.strategy.queue_dir,
@@ -294,3 +298,14 @@ def _package_version() -> str:
         return version("parquet-trader")
     except PackageNotFoundError:
         return "dev"
+
+
+def _operational_controls_enabled(settings: Settings) -> bool:
+    execution = settings.execution
+    if not execution.autonomous_enabled:
+        return False
+    if execution.autonomous_mode == "real":
+        return settings.mode.lower() == "real" and execution.autonomous_real_enabled
+    if execution.autonomous_mode == "demo":
+        return execution.autonomous_demo_enabled
+    return execution.autonomous_mode == "shadow"
