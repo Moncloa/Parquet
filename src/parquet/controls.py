@@ -207,6 +207,29 @@ def manual_review_status(
     }
 
 
+
+def latest_manual_review_status(
+    storage: Storage,
+    queue_dir: Path,
+) -> dict[str, object] | None:
+    with storage._lock:
+        row = storage.conn.execute(
+            "SELECT payload FROM events WHERE kind = 'manual_review_requested' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(str(row[0]))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    return manual_review_status(storage, queue_dir, request_id)
+
 def is_analysis_only_request(storage: Storage, request_id: str | None) -> bool:
     if not request_id:
         return False
