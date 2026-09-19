@@ -13,3 +13,11 @@ def test_strategy_service_cannot_access_broker_credentials() -> None:
     assert "User=parquet-strategy" in unit
     assert "InaccessiblePaths=/etc/parquet" in unit
     assert "ReadWritePaths=/var/lib/parquet-exchange /var/lib/parquet-strategy" in unit
+
+
+def test_update_script_refuses_non_main_without_explicit_override() -> None:
+    script = Path("scripts/update.sh").read_text(encoding="utf-8")
+    assert 'CURRENT_BRANCH="$(git branch --show-current)"' in script
+    assert '"$CURRENT_BRANCH" != "main"' in script
+    assert "--allow-non-main" in script
+    assert "refusing to update non-main branch" in script
