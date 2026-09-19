@@ -7,6 +7,7 @@ from pathlib import Path
 
 from parquet import api as api_module
 from parquet import main as cli_main
+from parquet.controls import is_analysis_only_request
 from parquet.models import MarketAnalysis
 from parquet.proposal_orchestrator import AutonomousOrchestrator as ProposalAutonomousOrchestrator
 from parquet.resilient_strategy import (
@@ -146,6 +147,19 @@ class AutonomousOrchestrator(ProposalAutonomousOrchestrator):
             analysis.generated_at.isoformat(),
             analysis.model_dump_json(),
         )
+        if is_analysis_only_request(self.storage, analysis.review_request_id):
+            self.storage.set("latest_observational_analysis_id", analysis.analysis_id)
+            self.storage.add_event(
+                "observational_analysis_ingested",
+                json.dumps(
+                    {
+                        "analysis_id": analysis.analysis_id,
+                        "request_id": analysis.review_request_id,
+                    }
+                ),
+            )
+            return
+
         for proposal in analysis.trade_proposals:
             self.storage.save_proposal(analysis.analysis_id, proposal)
         for watch in analysis.watch:
