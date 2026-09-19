@@ -95,6 +95,15 @@ def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str
             "managed_closed_pnl_estimated": closed_pnl_estimated,
             "commission_status": "exact_closed_trade_costs_not_available",
         },
+        "controls": {
+            "providers": (
+                worker.get("providers")
+                if isinstance(worker.get("providers"), dict)
+                else {}
+            ),
+            "active_request_id": worker.get("active_request_id"),
+            "active_provider": worker.get("active_provider"),
+        },
         "pending_reviews": [
             {
                 "at": review.at.isoformat(),
