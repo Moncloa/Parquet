@@ -85,12 +85,15 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 status_code=400,
                 detail="Operational review requires confirmation: ALLOW EXECUTION",
             )
-        request_id = begin_manual_review(
-            settings,
-            orchestrator,
-            provider=body.provider,
-            allow_execution=body.allow_execution,
-        )
+        try:
+            request_id = begin_manual_review(
+                settings,
+                orchestrator,
+                provider=body.provider,
+                allow_execution=body.allow_execution,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         control_task = asyncio.create_task(
             execute_manual_review(
                 settings,
