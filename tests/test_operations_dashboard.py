@@ -88,3 +88,4 @@ def test_operations_dashboard_renders_core_sections() -> None:
     assert "OIL" in html
     assert "10–50%" in html
     assert "abcdef12" in html
+    assert 'class="pill real">REAL</span>' in html
