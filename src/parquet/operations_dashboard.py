@@ -22,6 +22,12 @@ def render_operations_dashboard(snapshot: dict[str, Any]) -> str:
     execution_uncertain = bool(system.get("execution_uncertain"))
     runtime_commit = str(runtime.get("commit") or "unknown")
     short_commit = runtime_commit[:8] if runtime_commit != "unknown" else "unknown"
+    execution_mode = str(runtime.get("execution_mode") or "unknown").lower()
+    execution_mode_class = {
+        "real": "real",
+        "demo": "demo",
+        "shadow": "shadow",
+    }.get(execution_mode, "shadow")
 
     return f"""<!doctype html>
 <html lang="es">
@@ -47,6 +53,9 @@ h1 {{ margin:0; font-size:25px; letter-spacing:-.025em; }}
 .pill,.nav a {{ border:1px solid var(--border); border-radius:999px; padding:4px 9px; color:var(--muted); text-decoration:none; background:var(--panel); font-size:12px; }}
 .pill.ok {{ color:var(--green); border-color:#2b6a38; }} .pill.bad {{ color:var(--red); border-color:#7d2f2b; }}
 .pill.warn {{ color:var(--yellow); border-color:#6f561f; }}
+.pill.real {{ color:#f0883e; border-color:#9e6a03; }}
+.pill.demo {{ color:var(--blue); border-color:#1f6feb; }}
+.pill.shadow {{ color:var(--muted); border-color:var(--border); }}
 .nav {{ margin:12px 0 22px; }} .nav a:hover {{ color:var(--text); border-color:#6e7681; }}
 .grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }}
 .metric,.panel {{ border:1px solid var(--border); background:var(--panel); border-radius:9px; }}
@@ -87,7 +96,7 @@ footer {{ margin-top:24px; color:var(--muted); font-size:11px; }}
     <span class="pill {rec_class}">{escape(reconciliation)}</span>
     <span class="pill {'ok' if identity else 'bad'}">GCID {'verified' if identity else 'unverified'}</span>
     <span class="pill {'bad' if execution_uncertain else 'ok'}">{'execution uncertain' if execution_uncertain else 'execution clear'}</span>
-    <span class="pill">{escape(str(runtime.get('execution_mode') or 'unknown')).upper()}</span>
+    <span class="pill {execution_mode_class}">{escape(execution_mode.upper())}</span>
   </div>
 </header>
 
