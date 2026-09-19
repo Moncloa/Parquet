@@ -10,6 +10,8 @@ from fastapi.responses import HTMLResponse
 
 from parquet.config import Settings
 from parquet.dashboard import position_payload, render_positions_dashboard
+from parquet.operations import build_operations_snapshot
+from parquet.operations_dashboard import render_operations_dashboard
 from parquet.orchestrator import Orchestrator
 from parquet.strategy import StrategyDispatcher, StrategyQueue
 
@@ -46,6 +48,15 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                     await task
 
     app = FastAPI(title="Parquet", version="0.11.0", lifespan=lifespan)
+
+    @app.get("/", response_class=HTMLResponse)
+    def operations_page() -> HTMLResponse:
+        snapshot = build_operations_snapshot(settings, orchestrator)
+        return HTMLResponse(render_operations_dashboard(snapshot))
+
+    @app.get("/operations.json")
+    def operations_data() -> dict[str, object]:
+        return build_operations_snapshot(settings, orchestrator)
 
     @app.get("/positions", response_class=HTMLResponse)
     def positions_page() -> HTMLResponse:
