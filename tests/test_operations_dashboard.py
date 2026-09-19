@@ -14,6 +14,13 @@ def test_operations_dashboard_renders_core_sections() -> None:
                 "position_max_pct": 50.0,
                 "max_leverage": 2,
             },
+            "controls": {
+                "providers": {
+                    "local_ollama": {"ready": True, "status": "local ready"},
+                    "codex_cli": {"ready": True, "status": "codex ready"},
+                },
+                "latest_review": None,
+            },
             "overview": {
                 "equity_usd": 1000.0,
                 "daily_pnl_pct": 1.0,
@@ -81,6 +88,9 @@ def test_operations_dashboard_renders_core_sections() -> None:
     )
 
     assert "Parquet · Operations" in html
+    assert "Revisión local" in html
+    assert "Revisión Codex" in html
+    assert "analysis-only" in html
     assert "Reviews" in html
     assert "Decisions" in html
     assert "GOLD" in html

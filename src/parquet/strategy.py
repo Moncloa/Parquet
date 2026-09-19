@@ -178,12 +178,16 @@ class StrategyDispatcher:
                 request = ReviewRequest.model_validate_json(str(payload))
                 if self.queue.enqueue(request):
                     queued += 1
+                    control = request.context.get("_parquet_control")
+                    control_payload = control if isinstance(control, dict) else {}
                     self.storage.add_event(
                         "strategy_request_queued",
                         json.dumps(
                             {
                                 "request_id": request.request_id,
                                 "review_event_id": int(event_id),
+                                "provider": control_payload.get("strategy_provider"),
+                                "analysis_only": control_payload.get("analysis_only") is True,
                             }
                         ),
                     )
@@ -239,6 +243,27 @@ class StrategyDispatcher:
                 analysis = self.queue.read_result(path)
                 _validate_analysis_for_request(analysis, request)
                 await self.bridge.post_analysis(analysis)
+                control = request.context.get("_parquet_control")
+                control_payload = control if isinstance(control, dict) else {}
+                if control_payload.get("analysis_only") is True:
+                    self.storage.save_analysis(
+                        analysis.analysis_id,
+                        analysis.generated_at.astimezone(UTC).isoformat(),
+                        analysis.model_dump_json(),
+                    )
+                    self.storage.set(
+                        "latest_observational_analysis_id",
+                        analysis.analysis_id,
+                    )
+                    self.storage.add_event(
+                        "strategy_analysis_observational_saved",
+                        json.dumps(
+                            {
+                                "request_id": request_id,
+                                "analysis_id": analysis.analysis_id,
+                            }
+                        ),
+                    )
             except Exception as exc:
                 error = _redact(str(exc))[:1000]
                 self.storage.set("strategy_last_error", error)
@@ -262,6 +287,8 @@ class StrategyDispatcher:
                         "request_id": request_id,
                         "analysis_id": analysis.analysis_id,
                         "published_at": now,
+                        "provider": control_payload.get("strategy_provider"),
+                        "analysis_only": control_payload.get("analysis_only") is True,
                     }
                 ),
             )

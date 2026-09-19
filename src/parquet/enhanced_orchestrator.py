@@ -328,6 +328,8 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
         *,
         source: str | None = None,
         review_key: str | None = None,
+        request_id: str | None = None,
+        request_context: dict[str, object] | None = None,
     ) -> int:
         if self.bridge is None:
             return 0
@@ -335,6 +337,8 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
         due = self.reviews.due(current, source=source, key=review_key)
         if not due:
             return 0
+        if request_id is not None and len(due) != 1:
+            raise RuntimeError("Explicit request_id requires exactly one due review")
 
         active_symbols = {watch.symbol for watch in self.storage.active_watches(current)}
         review_symbols = sorted(active_symbols | set(self.settings.etoro.review_symbols))
@@ -382,12 +386,15 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
 
         count = 0
         for review in due:
+            request_payload_context = dict(context)
+            if request_context:
+                request_payload_context.update(request_context)
             request = ReviewRequest(
-                request_id=str(uuid4()),
+                request_id=request_id or str(uuid4()),
                 requested_at=current,
                 reason=review.reason,
                 symbols=review_symbols,
-                context=context,
+                context=request_payload_context,
             )
             await self.bridge.post_review_request(request)
             self.storage.add_event("review_request", request.model_dump_json())

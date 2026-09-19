@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import os
+from datetime import UTC, datetime
 
 from parquet import strategy_worker
 from parquet.models import ReviewRequest
+from parquet.strategy import CodexWorkerSettings, StrategyQueue, _redact
+from parquet.strategy_local import LocalStrategySettings, LocalStrategyWorker
+from parquet.strategy_worker import StdinCodexStrategyWorker
 
 
 def opportunity_strategy_prompt(request: ReviewRequest) -> str:
@@ -54,18 +59,176 @@ Review request JSON:
 """
 
 
+class RoutedStrategyWorker:
+    """Route each queued review to Local or Codex without changing systemd config."""
+
+    def __init__(self, default_provider: str) -> None:
+        self.default_provider = default_provider
+        self.queue = StrategyQueue(LocalStrategySettings.from_env().queue_dir)
+        self.local = LocalStrategyWorker(LocalStrategySettings.from_env())
+        self.codex = StdinCodexStrategyWorker(CodexWorkerSettings.from_env())
+        self.poll_seconds = float(os.getenv("PARQUET_STRATEGY_POLL_SECONDS", "5"))
+        self._providers: dict[str, dict[str, object]] = {
+            "local_ollama": {"ready": False, "status": "not checked"},
+            "codex_cli": {"ready": False, "status": "not checked"},
+        }
+        self._active_request_id: str | None = None
+        self._active_provider: str | None = None
+        self._active_stage: str | None = None
+        self._active_started_at: str | None = None
+        self._last_completed_request_id: str | None = None
+        self._last_completed_provider: str | None = None
+
+    async def refresh_providers(self, *, force: bool = False) -> None:
+        local_ready, local_status = await self.local.check_runtime(force=force)
+        codex_ready, codex_status = await self.codex.login_status(force=force)
+        self._providers = {
+            "local_ollama": {"ready": local_ready, "status": local_status},
+            "codex_cli": {"ready": codex_ready, "status": codex_status},
+        }
+
+    def provider_for(self, request: ReviewRequest) -> str:
+        control = request.context.get("_parquet_control")
+        if isinstance(control, dict):
+            requested = control.get("strategy_provider")
+            if isinstance(requested, str) and requested:
+                return requested.strip().lower()
+        return self.default_provider
+
+    def is_explicit(self, request: ReviewRequest) -> bool:
+        control = request.context.get("_parquet_control")
+        return isinstance(control, dict) and bool(control.get("strategy_provider"))
+
+    async def run_once(self) -> int:
+        await self.refresh_providers()
+        pending: list[tuple[object, ReviewRequest]] = []
+        processed = 0
+        for path in self.queue.request_paths():
+            try:
+                request = self.queue.read_request(path)
+            except Exception as exc:
+                self.queue.write_error(path.stem, f"Invalid strategy request JSON: {exc}")
+                processed += 1
+                continue
+            if self.queue.result_exists(request.request_id) or self.queue.error_exists(
+                request.request_id
+            ):
+                continue
+            pending.append((path, request))
+
+        automatic_local = [
+            item
+            for item in pending
+            if not self.is_explicit(item[1])
+            and self.provider_for(item[1]) == "local_ollama"
+        ]
+        if len(automatic_local) > 1:
+            automatic_local.sort(key=lambda item: item[1].requested_at)
+            keep_id = automatic_local[-1][1].request_id
+            stale_ids = {item[1].request_id for item in automatic_local[:-1]}
+            for stale_id in stale_ids:
+                self.queue.write_error(
+                    stale_id,
+                    f"superseded by newer local strategy request {keep_id}",
+                )
+                processed += 1
+            pending = [item for item in pending if item[1].request_id not in stale_ids]
+
+        if not pending:
+            self._write_status()
+            return processed
+
+        pending.sort(
+            key=lambda item: (
+                0 if self.is_explicit(item[1]) else 1,
+                item[1].requested_at,
+            )
+        )
+        _, request = pending[0]
+        provider = self.provider_for(request)
+        provider_state = self._providers.get(provider)
+        if provider_state is None:
+            self.queue.write_error(
+                request.request_id,
+                f"Unsupported strategy provider requested: {provider}",
+            )
+            self._write_status()
+            return processed + 1
+        if provider_state.get("ready") is not True:
+            self._write_status()
+            return processed
+
+        self._active_request_id = request.request_id
+        self._active_provider = provider
+        self._active_stage = "analysing"
+        self._active_started_at = datetime.now(UTC).isoformat()
+        self._write_status()
+        try:
+            if provider == "local_ollama":
+                analysis = await self.local.analyze(request)
+            else:
+                analysis = await self.codex.analyze(request)
+        except Exception as exc:
+            self.queue.write_error(request.request_id, _redact(str(exc))[:4000])
+        else:
+            self.queue.write_result(request.request_id, analysis)
+        finally:
+            self._last_completed_request_id = request.request_id
+            self._last_completed_provider = provider
+            self._active_request_id = None
+            self._active_provider = None
+            self._active_stage = None
+            self._active_started_at = None
+            self._write_status()
+        return processed + 1
+
+    async def run_forever(self) -> None:
+        self.queue.ensure_dirs()
+        await self.refresh_providers(force=True)
+        self._write_status()
+        while True:
+            try:
+                await self.run_once()
+            except Exception as exc:
+                self._active_stage = _redact(f"worker loop error: {exc}")[:500]
+                self._write_status()
+            await asyncio.sleep(self.poll_seconds)
+
+    def _write_status(self) -> None:
+        default_state = self._providers.get(
+            self.default_provider,
+            {"ready": False, "status": "unsupported default provider"},
+        )
+        codex_state = self._providers.get("codex_cli", {})
+        local_state = self._providers.get("local_ollama", {})
+        self.queue.write_worker_status(
+            {
+                "heartbeat_at": datetime.now(UTC).isoformat(),
+                "provider": "router",
+                "default_provider": self.default_provider,
+                "provider_ready": default_state.get("ready") is True,
+                "provider_status": default_state.get("status"),
+                "providers": self._providers,
+                "codex_authenticated": codex_state.get("ready") is True,
+                "codex_status": codex_state.get("status"),
+                "local_ready": local_state.get("ready") is True,
+                "local_status": local_state.get("status"),
+                "pending_requests": self.queue.pending_count(),
+                "active_request_id": self._active_request_id,
+                "active_provider": self._active_provider,
+                "active_stage": self._active_stage,
+                "active_started_at": self._active_started_at,
+                "last_completed_request_id": self._last_completed_request_id,
+                "last_completed_provider": self._last_completed_provider,
+            }
+        )
+
+
 def main() -> None:
-    # Install one common high-level policy. The normal recurring provider may be
-    # local Ollama; Codex remains available for explicit supervisory/review runs.
     strategy_worker.__dict__["_strategy_prompt"] = opportunity_strategy_prompt
     provider = os.getenv("PARQUET_STRATEGY_PROVIDER", "codex_cli").strip().lower()
-    if provider == "local_ollama":
-        from parquet.strategy_local import main as local_main
-
-        local_main()
-        return
-    if provider == "codex_cli":
-        strategy_worker.main()
+    if provider in {"local_ollama", "codex_cli"}:
+        asyncio.run(RoutedStrategyWorker(provider).run_forever())
         return
     if provider == "openai_api":
         from parquet.strategy_openai import main as openai_main

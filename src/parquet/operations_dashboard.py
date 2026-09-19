@@ -8,6 +8,7 @@ from typing import Any
 def render_operations_dashboard(snapshot: dict[str, Any]) -> str:
     runtime = _mapping(snapshot.get("runtime"))
     overview = _mapping(snapshot.get("overview"))
+    controls = _mapping(snapshot.get("controls"))
     system = _mapping(snapshot.get("system"))
     pending_reviews = _list(snapshot.get("pending_reviews"))
     reviews = _list(snapshot.get("reviews"))
@@ -15,6 +16,21 @@ def render_operations_dashboard(snapshot: dict[str, Any]) -> str:
     positions = _mapping(snapshot.get("positions"))
     open_positions = _list(positions.get("open"))
     watches = _list(snapshot.get("watches"))
+    providers = _mapping(controls.get("providers"))
+    local_provider = _mapping(providers.get("local_ollama"))
+    codex_provider = _mapping(providers.get("codex_cli"))
+    latest_control = _mapping(controls.get("latest_review"))
+    local_ready = local_provider.get("ready") is True
+    codex_ready = codex_provider.get("ready") is True
+    local_status = str(local_provider.get("status") or "Local provider unavailable")
+    codex_status = str(codex_provider.get("status") or "Codex provider unavailable")
+    latest_request_id = str(latest_control.get("request_id") or "")
+    latest_state = str(latest_control.get("state") or "")
+    resume_request_id = (
+        latest_request_id
+        if latest_state not in {"", "completed", "failed", "not_found"}
+        else ""
+    )
 
     reconciliation = str(system.get("reconciliation_state") or "UNKNOWN")
     rec_class = "ok" if reconciliation == "SYNCED" else "bad"
@@ -56,6 +72,16 @@ h1 {{ margin:0; font-size:25px; letter-spacing:-.025em; }}
 .pill.real {{ color:#f0883e; border-color:#9e6a03; }}
 .pill.demo {{ color:var(--blue); border-color:#1f6feb; }}
 .pill.shadow {{ color:var(--muted); border-color:var(--border); }}
+.controls-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
+.control-button {{ min-height:48px; border:1px solid var(--border); border-radius:8px; background:var(--panel2); color:var(--text); font:inherit; font-weight:650; padding:11px 14px; cursor:pointer; }}
+.control-button.local {{ border-color:#2b6a38; }}
+.control-button.codex {{ border-color:#1f6feb; }}
+.control-button:disabled {{ opacity:.42; cursor:not-allowed; }}
+.control-note {{ color:var(--muted); font-size:12px; margin-top:9px; }}
+.control-progress {{ margin-top:12px; border-top:1px solid var(--border); padding-top:12px; }}
+.progress-track {{ height:7px; overflow:hidden; border-radius:999px; background:var(--panel2); border:1px solid var(--border); }}
+.progress-fill {{ height:100%; width:0; background:var(--blue); transition:width .25s ease; }}
+.control-result {{ margin-top:8px; color:#c9d1d9; }}
 .nav {{ margin:12px 0 22px; }} .nav a:hover {{ color:var(--text); border-color:#6e7681; }}
 .grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }}
 .metric,.panel {{ border:1px solid var(--border); background:var(--panel); border-radius:9px; }}
@@ -83,7 +109,7 @@ pre {{ white-space:pre-wrap; word-break:break-word; margin:7px 0 0; color:#c9d1d
 code {{ font:12px ui-monospace,SFMono-Regular,Menlo,monospace; }}
 footer {{ margin-top:24px; color:var(--muted); font-size:11px; }}
 @media (max-width:900px) {{ .grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .row {{ grid-template-columns:1fr; }} .right {{ text-align:left; }} }}
-@media (max-width:620px) {{ header {{ flex-direction:column; }} .grid {{ grid-template-columns:1fr; }} .position {{ grid-template-columns:1fr; }} .pnl {{ text-align:left; }} }}
+@media (max-width:620px) {{ header {{ flex-direction:column; }} .grid {{ grid-template-columns:1fr; }} .controls-grid {{ grid-template-columns:1fr; }} .position {{ grid-template-columns:1fr; }} .pnl {{ text-align:left; }} }}
 </style>
 </head>
 <body><main>
@@ -101,9 +127,33 @@ footer {{ margin-top:24px; color:var(--muted); font-size:11px; }}
 </header>
 
 <div class="nav">
-  <a href="#overview">Overview</a><a href="#reviews">Reviews</a><a href="#decisions">Decisions</a>
-  <a href="#positions">Positions</a><a href="#system">System</a>
+  <a href="#controls">Controls</a><a href="#overview">Overview</a><a href="#reviews">Reviews</a>
+  <a href="#decisions">Decisions</a><a href="#positions">Positions</a><a href="#system">System</a>
 </div>
+
+<section id="controls" data-resume-request="{escape(resume_request_id)}">
+<div class="section-head"><h2>Controles</h2><span>revisiones manuales · analysis-only</span></div>
+<div class="panel">
+  <div class="controls-grid">
+    <button id="review-local" class="control-button local" type="button" data-provider="local_ollama"{'' if local_ready else ' disabled'} title="{escape(local_status)}">
+      Revisión local
+    </button>
+    <button id="review-codex" class="control-button codex" type="button" data-provider="codex_cli"{'' if codex_ready else ' disabled'} title="{escape(codex_status)}">
+      Revisión Codex
+    </button>
+  </div>
+  <div class="control-note">
+    Local: {escape("ready" if local_ready else local_status)} · Codex: {escape("ready" if codex_ready else codex_status)}.
+    Estas revisiones no pueden enviar órdenes al broker.
+  </div>
+  <div id="review-progress" class="control-progress" hidden>
+    <div class="title" id="review-progress-title">Preparando revisión</div>
+    <div class="progress-track" style="margin-top:8px"><div id="review-progress-fill" class="progress-fill"></div></div>
+    <div class="small" id="review-progress-message" style="margin-top:7px"></div>
+    <div class="control-result" id="review-progress-result"></div>
+  </div>
+</div>
+</section>
 
 <section id="overview">
 <div class="grid">
@@ -152,10 +202,140 @@ footer {{ margin-top:24px; color:var(--muted); font-size:11px; }}
 </div>
 </section>
 
-<footer>Auto-refresh cada 20 s. P/L cerrado marcado como estimado procede del último P/L observado si eToro ya no muestra la posición; no equivale todavía al histórico exacto de trade/costes.</footer>
-<script>setTimeout(function(){{ location.reload(); }}, 20000);</script>
+<footer>Auto-refresh cada 20 s cuando no hay una revisión manual en curso. P/L cerrado marcado como estimado procede del último P/L observado si eToro ya no muestra la posición; no equivale todavía al histórico exacto de trade/costes.</footer>
+<script>{_control_script()}</script>
 </main></body></html>"""
 
+
+
+def _control_script() -> str:
+    return r"""
+(function () {
+  const root = document.getElementById("controls");
+  if (!root || root.dataset.initialized === "1") return;
+  root.dataset.initialized = "1";
+
+  const localButton = document.getElementById("review-local");
+  const codexButton = document.getElementById("review-codex");
+  const panel = document.getElementById("review-progress");
+  const title = document.getElementById("review-progress-title");
+  const fill = document.getElementById("review-progress-fill");
+  const message = document.getElementById("review-progress-message");
+  const result = document.getElementById("review-progress-result");
+  let activeRequest = root.dataset.resumeRequest || "";
+  let running = Boolean(activeRequest);
+  window.parquetControlActive = running;
+
+  function setButtonsDisabled(value) {
+    [localButton, codexButton].forEach(function (button) {
+      if (!button) return;
+      const providerUnavailable = button.hasAttribute("data-provider-unavailable");
+      button.disabled = value || providerUnavailable || button.dataset.initialDisabled === "1";
+    });
+  }
+
+  [localButton, codexButton].forEach(function (button) {
+    if (!button) return;
+    if (button.disabled) button.dataset.initialDisabled = "1";
+  });
+
+  function renderStatus(data) {
+    panel.hidden = false;
+    const pct = Math.max(0, Math.min(100, Number(data.progress_pct || 0)));
+    fill.style.width = pct + "%";
+    title.textContent = String(data.state || "working").replaceAll("_", " ");
+    message.textContent = data.message || "";
+    result.textContent = "";
+
+    if (data.analysis) {
+      const proposalCount = Array.isArray(data.analysis.trade_proposals)
+        ? data.analysis.trade_proposals.length : 0;
+      const watchCount = Array.isArray(data.analysis.watch)
+        ? data.analysis.watch.length : 0;
+      result.textContent =
+        (data.analysis.summary || "Analysis completed") +
+        " · " + proposalCount + " proposal(s) · " + watchCount + " watch(es)";
+    }
+
+    if (data.state === "completed" || data.state === "failed" || data.state === "not_found") {
+      running = false;
+      activeRequest = "";
+      window.parquetControlActive = false;
+      setButtonsDisabled(false);
+    }
+  }
+
+  async function poll() {
+    if (!activeRequest) return;
+    try {
+      const response = await fetch("/controls/reviews/" + encodeURIComponent(activeRequest), {
+        cache: "no-store"
+      });
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const data = await response.json();
+      renderStatus(data);
+      if (running) window.setTimeout(poll, 1500);
+    } catch (error) {
+      panel.hidden = false;
+      title.textContent = "progress unavailable";
+      message.textContent = String(error);
+      if (running) window.setTimeout(poll, 3000);
+    }
+  }
+
+  async function start(provider) {
+    if (running) return;
+    running = true;
+    window.parquetControlActive = true;
+    setButtonsDisabled(true);
+    panel.hidden = false;
+    title.textContent = "collecting context";
+    message.textContent = "Preparing current market snapshot…";
+    result.textContent = "";
+    fill.style.width = "8%";
+
+    try {
+      const response = await fetch("/controls/reviews", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({provider: provider})
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error("HTTP " + response.status + ": " + detail);
+      }
+      const data = await response.json();
+      activeRequest = data.request_id || "";
+      renderStatus(data);
+      if (activeRequest && running) window.setTimeout(poll, 700);
+    } catch (error) {
+      running = false;
+      window.parquetControlActive = false;
+      title.textContent = "failed";
+      message.textContent = String(error);
+      fill.style.width = "100%";
+      setButtonsDisabled(false);
+    }
+  }
+
+  if (localButton) localButton.addEventListener("click", function () {
+    start("local_ollama");
+  });
+  if (codexButton) codexButton.addEventListener("click", function () {
+    start("codex_cli");
+  });
+
+  if (activeRequest) {
+    panel.hidden = false;
+    setButtonsDisabled(true);
+    poll();
+  }
+
+  window.setTimeout(function () {
+    if (!window.parquetControlActive) location.reload();
+  }, 20000);
+})();
+"""
 
 def _metric(label: str, value: str, hint: str) -> str:
     return f'<div class="metric"><div class="label">{escape(label)}</div><div class="value">{value}</div><div class="hint">{hint}</div></div>'

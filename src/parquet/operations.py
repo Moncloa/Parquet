@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from parquet.config import Settings
+from parquet.controls import latest_manual_review_status
 from parquet.dashboard import position_payload
 from parquet.models import MarketAnalysis
 from parquet.strategy import StrategyQueue
@@ -94,6 +95,17 @@ def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str
             ),
             "managed_closed_pnl_estimated": closed_pnl_estimated,
             "commission_status": "exact_closed_trade_costs_not_available",
+        },
+        "controls": {
+            "providers": (
+                worker.get("providers")
+                if isinstance(worker.get("providers"), dict)
+                else {}
+            ),
+            "latest_review": latest_manual_review_status(
+                storage,
+                settings.strategy.queue_dir,
+            ),
         },
         "pending_reviews": [
             {
