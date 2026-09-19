@@ -19,6 +19,7 @@ def test_operations_dashboard_renders_core_sections() -> None:
                     "local_ollama": {"ready": True, "status": "local ready"},
                     "codex_cli": {"ready": True, "status": "codex ready"},
                 },
+                "operational": {"enabled": True, "mode": "real"},
                 "latest_review": None,
             },
             "overview": {
@@ -90,7 +91,9 @@ def test_operations_dashboard_renders_core_sections() -> None:
     assert "Parquet · Operations" in html
     assert "Revisión local" in html
     assert "Revisión Codex" in html
-    assert "analysis-only" in html
+    assert "Solo análisis" in html
+    assert "Operativa · REAL" in html
+    assert "ALLOW EXECUTION" in html
     assert "Reviews" in html
     assert "Decisions" in html
     assert "GOLD" in html
