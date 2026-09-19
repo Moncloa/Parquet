@@ -17,6 +17,9 @@ def render_operations_dashboard(snapshot: dict[str, Any]) -> str:
     open_positions = _list(positions.get("open"))
     watches = _list(snapshot.get("watches"))
     providers = _mapping(controls.get("providers"))
+    operational = _mapping(controls.get("operational"))
+    operational_enabled = operational.get("enabled") is True
+    operational_mode = str(operational.get("mode") or "unknown").lower()
     local_provider = _mapping(providers.get("local_ollama"))
     codex_provider = _mapping(providers.get("codex_cli"))
     latest_control = _mapping(controls.get("latest_review"))
@@ -77,6 +80,13 @@ h1 {{ margin:0; font-size:25px; letter-spacing:-.025em; }}
 .control-button.local {{ border-color:#2b6a38; }}
 .control-button.codex {{ border-color:#1f6feb; }}
 .control-button:disabled {{ opacity:.42; cursor:not-allowed; }}
+.mode-switch {{ display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }}
+.mode-option {{ border:1px solid var(--border); border-radius:999px; background:var(--panel2); color:var(--muted); padding:6px 10px; font:inherit; cursor:pointer; }}
+.mode-option.active {{ color:var(--text); border-color:var(--blue); }}
+.mode-option.operational.active {{ color:#f0883e; border-color:#9e6a03; }}
+.mode-option:disabled {{ opacity:.42; cursor:not-allowed; }}
+.execution-warning {{ display:none; margin:10px 0 0; padding:9px 10px; border:1px solid #9e6a03; border-radius:7px; color:#f0883e; background:#1a1510; font-size:12px; }}
+.execution-warning.visible {{ display:block; }}
 .control-note {{ color:var(--muted); font-size:12px; margin-top:9px; }}
 .control-progress {{ margin-top:12px; border-top:1px solid var(--border); padding-top:12px; }}
 .progress-track {{ height:7px; overflow:hidden; border-radius:999px; background:var(--panel2); border:1px solid var(--border); }}
@@ -131,9 +141,15 @@ footer {{ margin-top:24px; color:var(--muted); font-size:11px; }}
   <a href="#decisions">Decisions</a><a href="#positions">Positions</a><a href="#system">System</a>
 </div>
 
-<section id="controls" data-resume-request="{escape(resume_request_id)}">
-<div class="section-head"><h2>Controles</h2><span>revisiones manuales · analysis-only</span></div>
+<section id="controls" data-resume-request="{escape(resume_request_id)}" data-operational-mode="{escape(operational_mode)}">
+<div class="section-head"><h2>Controles</h2><span>revisiones manuales</span></div>
 <div class="panel">
+  <div class="mode-switch">
+    <button id="mode-analysis" class="mode-option active" type="button">Solo análisis</button>
+    <button id="mode-operational" class="mode-option operational" type="button"{'' if operational_enabled else ' disabled'}>
+      Operativa · {escape(operational_mode.upper())}
+    </button>
+  </div>
   <div class="controls-grid">
     <button id="review-local" class="control-button local" type="button" data-provider="local_ollama"{'' if local_ready else ' disabled'} title="{escape(local_status)}">
       Revisión local
@@ -142,9 +158,12 @@ footer {{ margin-top:24px; color:var(--muted); font-size:11px; }}
       Revisión Codex
     </button>
   </div>
+  <div id="execution-warning" class="execution-warning">
+    Modo operativo: una propuesta que supere reconciliación, identidad, riesgo, sizing, costes y demás gates podrá llegar al broker en modo {escape(operational_mode.upper())}.
+  </div>
   <div class="control-note">
     Local: {escape("ready" if local_ready else local_status)} · Codex: {escape("ready" if codex_ready else codex_status)}.
-    Estas revisiones no pueden enviar órdenes al broker.
+    Solo análisis nunca ejecuta. Operativa usa exactamente el flujo autónomo configurado.
   </div>
   <div id="review-progress" class="control-progress" hidden>
     <div class="title" id="review-progress-title">Preparando revisión</div>
@@ -217,6 +236,9 @@ def _control_script() -> str:
 
   const localButton = document.getElementById("review-local");
   const codexButton = document.getElementById("review-codex");
+  const analysisMode = document.getElementById("mode-analysis");
+  const operationalMode = document.getElementById("mode-operational");
+  const executionWarning = document.getElementById("execution-warning");
   const panel = document.getElementById("review-progress");
   const title = document.getElementById("review-progress-title");
   const fill = document.getElementById("review-progress-fill");
@@ -224,6 +246,7 @@ def _control_script() -> str:
   const result = document.getElementById("review-progress-result");
   let activeRequest = root.dataset.resumeRequest || "";
   let running = Boolean(activeRequest);
+  let allowExecution = false;
   window.parquetControlActive = running;
 
   function setButtonsDisabled(value) {
@@ -252,9 +275,13 @@ def _control_script() -> str:
         ? data.analysis.trade_proposals.length : 0;
       const watchCount = Array.isArray(data.analysis.watch)
         ? data.analysis.watch.length : 0;
-      result.textContent =
-        (data.analysis.summary || "Analysis completed") +
-        " · " + proposalCount + " proposal(s) · " + watchCount + " watch(es)";
+      let suffix = " · " + proposalCount + " proposal(s) · " + watchCount + " watch(es)";
+      if (Array.isArray(data.execution) && data.execution.length) {
+        suffix += " · " + data.execution.map(function (item) {
+          return (item.symbol || "?") + ": " + (item.state || "unknown");
+        }).join(" · ");
+      }
+      result.textContent = (data.analysis.summary || "Analysis completed") + suffix;
     }
 
     if (data.state === "completed" || data.state === "failed" || data.state === "not_found") {
@@ -283,8 +310,25 @@ def _control_script() -> str:
     }
   }
 
+  function selectMode(operational) {
+    if (running) return;
+    allowExecution = Boolean(operational);
+    analysisMode.classList.toggle("active", !allowExecution);
+    operationalMode.classList.toggle("active", allowExecution);
+    executionWarning.classList.toggle("visible", allowExecution);
+  }
+
   async function start(provider) {
     if (running) return;
+    if (allowExecution) {
+      const mode = (root.dataset.operationalMode || "unknown").toUpperCase();
+      const accepted = window.confirm(
+        "Revisión OPERATIVA " + mode + ".\n\n" +
+        "Si el análisis genera una propuesta y supera todos los gates, Parquet puede abrir una posición.\n\n" +
+        "¿Continuar?"
+      );
+      if (!accepted) return;
+    }
     running = true;
     window.parquetControlActive = true;
     setButtonsDisabled(true);
@@ -298,7 +342,11 @@ def _control_script() -> str:
       const response = await fetch("/controls/reviews", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({provider: provider})
+        body: JSON.stringify({
+          provider: provider,
+          allow_execution: allowExecution,
+          confirmation: allowExecution ? "ALLOW EXECUTION" : null
+        })
       });
       if (!response.ok) {
         const detail = await response.text();
@@ -317,6 +365,13 @@ def _control_script() -> str:
       setButtonsDisabled(false);
     }
   }
+
+  if (analysisMode) analysisMode.addEventListener("click", function () {
+    selectMode(false);
+  });
+  if (operationalMode) operationalMode.addEventListener("click", function () {
+    if (!operationalMode.disabled) selectMode(true);
+  });
 
   if (localButton) localButton.addEventListener("click", function () {
     start("local_ollama");

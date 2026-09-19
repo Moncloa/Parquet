@@ -218,12 +218,20 @@ curl -fsS http://127.0.0.1:8787/status
 
 When strategy is enabled, `/health` also exposes worker heartbeat/readiness, pending requests, last strategy analysis ID and last error. It never exposes Codex credentials.
 
-The operations dashboard is the main read-only runtime console:
+The operations dashboard is the main runtime console:
 
 ```text
 GET /
 GET /operations.json
 ```
+
+Manual strategy reviews can be started from the Controls section in two explicit modes:
+
+- **Analysis only**: stores the result for inspection and never feeds broker execution.
+- **Operational**: feeds proposals into the normal autonomous proposal/gate/preflight path.
+  Operational mode requires an explicit UI/API confirmation and does not bypass any
+  reconciliation, identity, risk, sizing, stop-loss, cost, eligibility or execution gates.
+
 
 It summarizes runtime revision/mode, equity and current P/L, recent and pending
 reviews, NO TRADE decisions, deterministic execution rejections, active

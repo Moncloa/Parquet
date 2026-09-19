@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -25,6 +25,8 @@ from parquet.strategy import StrategyDispatcher, StrategyQueue
 
 class ManualReviewControlRequest(BaseModel):
     provider: Literal["local_ollama", "codex_cli"]
+    allow_execution: bool = False
+    confirmation: str | None = None
 
 
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
@@ -78,17 +80,27 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
 
     @app.post("/controls/reviews")
     async def start_manual_review(body: ManualReviewControlRequest) -> dict[str, object]:
-        request_id = begin_manual_review(
-            settings,
-            orchestrator,
-            provider=body.provider,
-        )
+        if body.allow_execution and body.confirmation != "ALLOW EXECUTION":
+            raise HTTPException(
+                status_code=400,
+                detail="Operational review requires confirmation: ALLOW EXECUTION",
+            )
+        try:
+            request_id = begin_manual_review(
+                settings,
+                orchestrator,
+                provider=body.provider,
+                allow_execution=body.allow_execution,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         control_task = asyncio.create_task(
             execute_manual_review(
                 settings,
                 orchestrator,
                 request_id=request_id,
                 provider=body.provider,
+                allow_execution=body.allow_execution,
             ),
             name=f"manual-review-{request_id}",
         )
