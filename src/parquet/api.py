@@ -4,11 +4,18 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 from parquet.config import Settings
+from parquet.controls import (
+    begin_manual_review,
+    execute_manual_review,
+    manual_review_status,
+)
 from parquet.dashboard import position_payload, render_positions_dashboard
 from parquet.operations import build_operations_snapshot
 from parquet.operations_dashboard import render_operations_dashboard
@@ -16,7 +23,13 @@ from parquet.orchestrator import Orchestrator
 from parquet.strategy import StrategyDispatcher, StrategyQueue
 
 
+class ManualReviewControlRequest(BaseModel):
+    provider: Literal["local_ollama", "codex_cli"]
+
+
 def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
+    control_tasks: set[asyncio.Task[None]] = set()
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         task: asyncio.Task[None] | None = None
@@ -46,6 +59,11 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+            for control_task in tuple(control_tasks):
+                control_task.cancel()
+            for control_task in tuple(control_tasks):
+                with suppress(asyncio.CancelledError):
+                    await control_task
 
     app = FastAPI(title="Parquet", version="0.11.0", lifespan=lifespan)
 
@@ -57,6 +75,38 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
     @app.get("/operations.json")
     def operations_data() -> dict[str, object]:
         return build_operations_snapshot(settings, orchestrator)
+
+    @app.post("/controls/reviews")
+    async def start_manual_review(body: ManualReviewControlRequest) -> dict[str, object]:
+        request_id = begin_manual_review(
+            settings,
+            orchestrator,
+            provider=body.provider,
+        )
+        control_task = asyncio.create_task(
+            execute_manual_review(
+                settings,
+                orchestrator,
+                request_id=request_id,
+                provider=body.provider,
+            ),
+            name=f"manual-review-{request_id}",
+        )
+        control_tasks.add(control_task)
+        control_task.add_done_callback(control_tasks.discard)
+        return manual_review_status(
+            orchestrator.storage,
+            settings.strategy.queue_dir,
+            request_id,
+        )
+
+    @app.get("/controls/reviews/{request_id}")
+    def manual_review_progress(request_id: str) -> dict[str, object]:
+        return manual_review_status(
+            orchestrator.storage,
+            settings.strategy.queue_dir,
+            request_id,
+        )
 
     @app.get("/positions", response_class=HTMLResponse)
     def positions_page() -> HTMLResponse:
@@ -117,6 +167,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "strategy_usage_limited": strategy["usage_limited"],
             "strategy_retry_at": strategy["retry_at"],
             "strategy_pending_requests": strategy["pending_requests"],
+            "strategy_providers": strategy["providers"],
+            "strategy_active_request_id": strategy["active_request_id"],
+            "strategy_active_provider": strategy["active_provider"],
             "strategy_last_analysis_id": orchestrator.storage.get("strategy_last_analysis_id"),
             "strategy_last_error": orchestrator.storage.get("strategy_last_error") or None,
             "execution_gate": True,
@@ -240,6 +293,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "strategy_usage_limited": strategy["usage_limited"],
             "strategy_retry_at": strategy["retry_at"],
             "strategy_pending_requests": strategy["pending_requests"],
+            "strategy_providers": strategy["providers"],
+            "strategy_active_request_id": strategy["active_request_id"],
+            "strategy_active_provider": strategy["active_provider"],
             "strategy_last_analysis_id": orchestrator.storage.get("strategy_last_analysis_id"),
             "strategy_last_success_at": orchestrator.storage.get("strategy_last_success_at"),
             "strategy_last_error": orchestrator.storage.get("strategy_last_error") or None,
@@ -331,6 +387,9 @@ def _strategy_state(settings: Settings, orchestrator: Orchestrator) -> dict[str,
             "usage_limited": False,
             "retry_at": None,
             "pending_requests": 0,
+            "providers": {},
+            "active_request_id": None,
+            "active_provider": None,
         }
     queue = StrategyQueue(settings.strategy.queue_dir)
     worker = queue.worker_status()
@@ -338,7 +397,11 @@ def _strategy_state(settings: Settings, orchestrator: Orchestrator) -> dict[str,
     codex_authenticated = bool(
         worker is not None and worker.get("codex_authenticated") is True
     )
-    worker_alive = codex_authenticated and _heartbeat_fresh(heartbeat_at)
+    provider_ready = bool(
+        worker is not None
+        and worker.get("provider_ready", worker.get("codex_authenticated")) is True
+    )
+    worker_alive = provider_ready and _heartbeat_fresh(heartbeat_at)
     usage_limited = orchestrator.storage.get("strategy_usage_limited") == "1"
     retry_at = orchestrator.storage.get("strategy_usage_retry_at") or None
     worker_ready = worker_alive and not usage_limited
@@ -354,6 +417,13 @@ def _strategy_state(settings: Settings, orchestrator: Orchestrator) -> dict[str,
         "usage_limited": usage_limited,
         "retry_at": retry_at,
         "pending_requests": pending,
+        "providers": (
+            worker.get("providers")
+            if worker is not None and isinstance(worker.get("providers"), dict)
+            else {}
+        ),
+        "active_request_id": None if worker is None else worker.get("active_request_id"),
+        "active_provider": None if worker is None else worker.get("active_provider"),
     }
 
 
