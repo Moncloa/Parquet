@@ -8,6 +8,7 @@ Type=simple
 User=parquet
 Group=parquet
 EnvironmentFile=-/etc/parquet/parquet.env
+EnvironmentFile=-/etc/parquet/runtime.env
 ExecStart=/opt/parquet/venv/bin/parquet serve
 Restart=on-failure
 RestartSec=5
