@@ -30,11 +30,19 @@ def test_operations_snapshot_connects_reviews_decisions_and_positions(tmp_path) 
     storage.save_analysis(analysis.analysis_id, now.isoformat(), analysis.model_dump_json())
     storage.add_event(
         "review_request",
-        '{"schema_version":1,"request_id":"request-1","requested_at":"2026-09-19T09:29:00Z","reason":"manual_opportunity_scan","symbols":[],"context":{}}',
+        (
+            '{"schema_version":1,"request_id":"request-1",'
+            '"requested_at":"2026-09-19T09:29:00Z",'
+            '"reason":"manual_opportunity_scan","symbols":[],"context":{}}'
+        ),
     )
     storage.add_event(
         "direct_proposal_execution_rejected",
-        '{"proposal_id":"p1","symbol":"GOLD","reasons":["spread_too_wide"],"gate":{"approved":false,"spread_bps":42.0}}',
+        (
+            '{"proposal_id":"p1","symbol":"GOLD",'
+            '"reasons":["spread_too_wide"],'
+            '"gate":{"approved":false,"spread_bps":42.0}}'
+        ),
     )
     storage.set_risk_snapshot(
         RiskSnapshot(
