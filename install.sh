@@ -11,6 +11,7 @@ ETC_DIR=/etc/parquet
 OPT_DIR=/opt/parquet
 STATE_DIR=/var/lib/parquet
 SERVICE=/etc/systemd/system/parquet.service
+RUNTIME_ENV="$ETC_DIR/runtime.env"
 GITHUB_DEPLOY_KEY="$ETC_DIR/github_deploy_key"
 GITHUB_DEPLOY_PUB="$ETC_DIR/github_deploy_key.pub"
 GITHUB_KNOWN_HOSTS="$ETC_DIR/github_known_hosts"
@@ -71,6 +72,18 @@ if [[ ! -f "$ETC_DIR/parquet.yaml" ]]; then
   install -m 0640 -o root -g parquet \
     "$ROOT_DIR/config/parquet.example.yaml" "$ETC_DIR/parquet.yaml"
 fi
+
+RUNTIME_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+RUNTIME_BRANCH="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
+if [[ -z "$RUNTIME_BRANCH" ]]; then
+  RUNTIME_BRANCH=detached
+fi
+cat > "$RUNTIME_ENV" <<EOF
+PARQUET_RUNTIME_COMMIT=$RUNTIME_COMMIT
+PARQUET_RUNTIME_BRANCH=$RUNTIME_BRANCH
+EOF
+chown root:parquet "$RUNTIME_ENV"
+chmod 0640 "$RUNTIME_ENV"
 
 if [[ ! -f "$ETC_DIR/parquet.env" ]]; then
   cat > "$ETC_DIR/parquet.env" <<'ENV'
