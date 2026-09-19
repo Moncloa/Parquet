@@ -78,9 +78,10 @@ async def execute_manual_review(
             _validate_operational_mode(settings, orchestrator.storage)
 
         current = datetime.now(UTC)
+        review_kind = "operational" if allow_execution else "analysis"
         review = ScheduledReview(
             at=current,
-            reason=f"manual_web:{normalized}",
+            reason=f"manual_web:{normalized}:{review_kind}",
             source="manual_web",
         )
         orchestrator.add_review(review)
