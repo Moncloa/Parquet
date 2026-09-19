@@ -54,9 +54,13 @@ execution:
   live_test_enabled: false
   live_test_max_amount_usd: 25.0
 
-  # Autonomous execution remains shadow/demo only.
+  # Autonomous execution mode. Real execution remains separately gated.
   autonomous_enabled: false
   autonomous_mode: shadow
+  autonomous_real_enabled: false
+  autonomous_real_min_position_pct: 10.0
+  autonomous_real_max_position_pct: 50.0
+  autonomous_real_max_leverage: 2
 
   # Real Agent Portfolio execution is a separate supervised gate.
   supervised_real_enabled: false

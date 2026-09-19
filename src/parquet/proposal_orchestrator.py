@@ -9,9 +9,10 @@ from parquet.enhanced_orchestrator import (
 )
 from parquet.execution.autonomous_real import AutonomousRealExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
+from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.models import MarketObservation, Side, TradeProposal, TriggerAction
 from parquet.reconciliation import ReconciliationService
-from parquet.tickets import choose_leverage_terms, validate_what_if_costs
+from parquet.tickets import validate_what_if_costs
 
 _EXCLUDED_AUTONOMOUS_SYMBOLS = {"AIR", "AIR.PA"}
 
@@ -211,15 +212,19 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
             raise RuntimeError(f"eToro does not allow opening instrument {instrument_id}")
 
         direction = "LONG" if proposal.side == Side.BUY else "SHORT"
+        virtual_capital_minimum = (
+            snapshot.equity_usd * config.autonomous_real_min_position_pct / 100
+        )
         virtual_capital_cap = (
             snapshot.equity_usd * config.autonomous_real_max_position_pct / 100
         )
         leverage, settlement_type, broker_minimum, chosen_amount, maximum_safe = (
-            choose_leverage_terms(
+            choose_autonomous_real_terms(
                 eligibility,
                 direction=direction,
                 gate_maximum_notional_usd=decision.amount_usd,
-                supervised_cap_usd=virtual_capital_cap,
+                minimum_capital_usd=virtual_capital_minimum,
+                maximum_capital_usd=virtual_capital_cap,
                 max_leverage=config.autonomous_real_max_leverage,
             )
         )
@@ -243,7 +248,9 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
 
         payload["real_preflight"] = {
             "virtual_equity_usd": snapshot.equity_usd,
+            "min_position_pct": config.autonomous_real_min_position_pct,
             "max_position_pct": config.autonomous_real_max_position_pct,
+            "minimum_virtual_capital_usd": virtual_capital_minimum,
             "maximum_virtual_capital_usd": virtual_capital_cap,
             "broker_minimum_usd": broker_minimum,
             "maximum_safe_virtual_capital_usd": maximum_safe,

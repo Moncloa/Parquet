@@ -5,9 +5,81 @@ import pytest
 from parquet.config import EtoroConfig, ExecutionConfig, Settings
 from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
 from parquet.execution.autonomous_real import AutonomousRealExecutionAdapter
+from parquet.execution.etoro import EtoroEligibilityResult
+from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.models import RiskSnapshot
 from parquet.portfolio import PositionManager
 from parquet.storage import Storage
+
+
+def _eligibility(*, leverages: list[int] | None = None) -> EtoroEligibilityResult:
+    return EtoroEligibilityResult(
+        request_id="eligibility-autonomous-real",
+        instrument_id=1001,
+        symbol="TEST",
+        min_position_exposure=10.0,
+        allow_open_position=True,
+        leverage_configs=(
+            {
+                "settlementType": "CFD",
+                "direction": "LONG",
+                "leverageValues": leverages or [1, 2],
+                "minPositionAmount": 10.0,
+            },
+        ),
+        response={},
+    )
+
+
+def test_autonomous_real_percentage_defaults() -> None:
+    config = ExecutionConfig()
+
+    assert config.autonomous_real_min_position_pct == 10.0
+    assert config.autonomous_real_max_position_pct == 50.0
+    assert config.autonomous_real_max_leverage == 2
+
+
+def test_autonomous_real_sizing_accepts_risk_amount_within_range() -> None:
+    leverage, settlement, minimum, amount, maximum = choose_autonomous_real_terms(
+        _eligibility(),
+        direction="LONG",
+        gate_maximum_notional_usd=2_500.0,
+        minimum_capital_usd=1_000.0,
+        maximum_capital_usd=5_000.0,
+        max_leverage=2,
+    )
+
+    assert leverage == 1
+    assert settlement == "CFD"
+    assert minimum == 10.0
+    assert amount == 2_500.0
+    assert maximum == 2_500.0
+
+
+def test_autonomous_real_sizing_caps_at_configured_maximum() -> None:
+    _, _, _, amount, maximum = choose_autonomous_real_terms(
+        _eligibility(),
+        direction="LONG",
+        gate_maximum_notional_usd=8_000.0,
+        minimum_capital_usd=1_000.0,
+        maximum_capital_usd=5_000.0,
+        max_leverage=2,
+    )
+
+    assert amount == 5_000.0
+    assert maximum == 5_000.0
+
+
+def test_autonomous_real_sizing_does_not_inflate_below_minimum() -> None:
+    with pytest.raises(RuntimeError, match="below autonomous minimum"):
+        choose_autonomous_real_terms(
+            _eligibility(leverages=[2]),
+            direction="LONG",
+            gate_maximum_notional_usd=1_900.0,
+            minimum_capital_usd=1_000.0,
+            maximum_capital_usd=5_000.0,
+            max_leverage=2,
+        )
 
 
 def _attempt(amount_usd: float, leverage: int = 2) -> ExecutionAttempt:
@@ -61,18 +133,29 @@ def test_autonomous_real_is_disabled_by_default(tmp_path) -> None:  # type: igno
         adapter._assert_supervised_allowed(_attempt(10.0), "")
 
 
-def test_autonomous_real_accepts_amount_at_percentage_cap(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_autonomous_real_accepts_amount_within_percentage_range(tmp_path) -> None:  # type: ignore[no-untyped-def]
     adapter = _adapter(
         tmp_path,
         ExecutionConfig(
             autonomous_enabled=True,
             autonomous_mode="real",
             autonomous_real_enabled=True,
-            autonomous_real_max_position_pct=12.5,
-            autonomous_real_max_leverage=2,
         ),
     )
-    adapter._assert_supervised_allowed(_attempt(1250.0, leverage=2), "")
+    adapter._assert_supervised_allowed(_attempt(2500.0, leverage=2), "")
+
+
+def test_autonomous_real_rejects_amount_below_percentage_minimum(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    adapter = _adapter(
+        tmp_path,
+        ExecutionConfig(
+            autonomous_enabled=True,
+            autonomous_mode="real",
+            autonomous_real_enabled=True,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="below autonomous real minimum"):
+        adapter._assert_supervised_allowed(_attempt(999.99, leverage=2), "")
 
 
 def test_autonomous_real_rejects_amount_above_percentage_cap(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -82,12 +165,10 @@ def test_autonomous_real_rejects_amount_above_percentage_cap(tmp_path) -> None: 
             autonomous_enabled=True,
             autonomous_mode="real",
             autonomous_real_enabled=True,
-            autonomous_real_max_position_pct=12.5,
-            autonomous_real_max_leverage=2,
         ),
     )
     with pytest.raises(RuntimeError, match="exceeds autonomous real cap"):
-        adapter._assert_supervised_allowed(_attempt(1250.01, leverage=2), "")
+        adapter._assert_supervised_allowed(_attempt(5000.01, leverage=2), "")
 
 
 def test_autonomous_real_rejects_excess_leverage(tmp_path) -> None:  # type: ignore[no-untyped-def]

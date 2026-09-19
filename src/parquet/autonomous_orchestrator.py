@@ -13,6 +13,7 @@ from parquet.execution.autonomous import (
 )
 from parquet.execution.demo import DemoExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
+from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.models import (
     Bias,
@@ -797,40 +798,36 @@ class AutonomousOrchestrator(Orchestrator):
             if not eligibility.allow_open_position:
                 raise RuntimeError("broker_disallows_open_position")
             direction = "LONG" if proposal.side == Side.BUY else "SHORT"
-            max_exposure = min(
-                decision.amount_usd,
+            minimum_capital = (
+                snapshot.equity_usd
+                * self.settings.execution.autonomous_real_min_position_pct
+                / 100.0
+            )
+            maximum_capital = (
                 snapshot.equity_usd
                 * self.settings.execution.autonomous_real_max_position_pct
-                / 100.0,
+                / 100.0
             )
-            selected: tuple[int, str, float] | None = None
-            for leverage in eligibility.allowed_leverages(direction=direction):
-                if leverage > self.settings.execution.autonomous_real_max_leverage:
-                    continue
-                capital = max_exposure / leverage
-                minimum = eligibility.minimum_amount(
-                    direction=direction,
-                    leverage=leverage,
-                )
-                if minimum is not None and capital + 1e-9 < minimum:
-                    continue
-                settlement = eligibility.settlement_type(
-                    direction=direction,
-                    leverage=leverage,
-                )
-                selected = (leverage, settlement, capital)
-                break
-            if selected is None:
-                raise RuntimeError(
-                    "no_broker_terms_within_autonomous_risk_caps"
-                )
+            (
+                leverage,
+                settlement_type,
+                _broker_minimum,
+                capital,
+                _maximum_safe,
+            ) = choose_autonomous_real_terms(
+                eligibility,
+                direction=direction,
+                gate_maximum_notional_usd=decision.amount_usd,
+                minimum_capital_usd=minimum_capital,
+                maximum_capital_usd=maximum_capital,
+                max_leverage=self.settings.execution.autonomous_real_max_leverage,
+            )
         except Exception as exc:
             return self._block_real_attempt(
                 attempt,
                 f"real_broker_preflight:{exc}",
             )
 
-        leverage, settlement_type, capital = selected
         refreshed = attempt.model_copy(
             update={
                 "amount_usd": capital,

@@ -309,13 +309,21 @@ class RealSmallExecutionAdapter:
         snapshot = self.storage.get_risk_snapshot()
         if snapshot is None or snapshot.equity_usd is None:
             raise RuntimeError("Real execution blocked: risk snapshot equity is unavailable")
-        maximum_exposure = (
+        minimum_capital = (
+            snapshot.equity_usd * config.autonomous_real_min_position_pct / 100.0
+        )
+        if attempt.amount_usd + 1e-9 < minimum_capital:
+            raise RuntimeError(
+                f"Amount {attempt.amount_usd:.2f} is below autonomous real minimum "
+                f"{minimum_capital:.2f}"
+            )
+        maximum_capital = (
             snapshot.equity_usd * config.autonomous_real_max_position_pct / 100.0
         )
-        if attempt.exposure_usd > maximum_exposure + 1e-9:
+        if attempt.amount_usd > maximum_capital + 1e-9:
             raise RuntimeError(
-                f"Exposure {attempt.exposure_usd:.2f} exceeds autonomous real cap "
-                f"{maximum_exposure:.2f}"
+                f"Amount {attempt.amount_usd:.2f} exceeds autonomous real cap "
+                f"{maximum_capital:.2f}"
             )
 
     async def _assert_agent_portfolio_identity(self) -> None:

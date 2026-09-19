@@ -115,7 +115,8 @@ class ExecutionConfig(BaseModel):
     autonomous_demo_max_amount_usd: float = Field(default=25.0, gt=0, le=1000.0)
     autonomous_demo_max_leverage: int = Field(default=2, ge=1, le=100)
     autonomous_real_enabled: bool = False
-    autonomous_real_max_position_pct: float = Field(default=12.5, gt=0, le=100)
+    autonomous_real_min_position_pct: float = Field(default=10.0, gt=0, le=100)
+    autonomous_real_max_position_pct: float = Field(default=50.0, gt=0, le=100)
     autonomous_real_max_leverage: int = Field(default=2, ge=1, le=100)
     supervised_real_enabled: bool = False
     supervised_real_max_amount_usd: float = Field(default=25.0, gt=0, le=100.0)
@@ -127,6 +128,11 @@ class ExecutionConfig(BaseModel):
     def validate_autonomous_mode(self) -> ExecutionConfig:
         if self.autonomous_mode not in {"shadow", "demo", "real"}:
             raise ValueError("autonomous_mode must be shadow, demo or real")
+        if self.autonomous_real_min_position_pct > self.autonomous_real_max_position_pct:
+            raise ValueError(
+                "autonomous_real_min_position_pct cannot exceed "
+                "autonomous_real_max_position_pct"
+            )
         return self
 
 

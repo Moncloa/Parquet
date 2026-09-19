@@ -239,6 +239,7 @@ def _autonomous_adapter(tmp_path, client, snapshots):
             autonomous_enabled=True,
             autonomous_mode="real",
             autonomous_real_enabled=True,
+            autonomous_real_min_position_pct=1.0,
             autonomous_real_max_position_pct=12.5,
             autonomous_real_max_leverage=2,
             broker_lookup_attempts=2,
@@ -475,7 +476,7 @@ async def test_autonomous_real_success_requires_no_manual_confirmation(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_autonomous_real_enforces_portfolio_exposure_cap(tmp_path) -> None:
+async def test_autonomous_real_enforces_portfolio_capital_cap(tmp_path) -> None:
     adapter, storage, reconciliation = _autonomous_adapter(
         tmp_path,
         SuccessClient(),
@@ -492,7 +493,7 @@ async def test_autonomous_real_enforces_portfolio_exposure_cap(tmp_path) -> None
             weekly_pnl_pct=0.0,
         )
     )
-    attempt = _attempt(amount=70.0).model_copy(
+    attempt = _attempt(amount=125.01).model_copy(
         update={"state": ExecutionAttemptState.REAL_PENDING}
     )
 

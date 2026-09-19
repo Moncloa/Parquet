@@ -117,6 +117,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
             "autonomous_real_execution": settings.execution.autonomous_real_enabled,
+            "autonomous_real_min_position_pct": (
+                settings.execution.autonomous_real_min_position_pct
+            ),
             "autonomous_real_max_position_pct": (
                 settings.execution.autonomous_real_max_position_pct
             ),
@@ -233,6 +236,9 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             "autonomous_execution_configured": settings.execution.autonomous_enabled,
             "autonomous_execution_mode": settings.execution.autonomous_mode,
             "autonomous_real_execution": settings.execution.autonomous_real_enabled,
+            "autonomous_real_min_position_pct": (
+                settings.execution.autonomous_real_min_position_pct
+            ),
             "autonomous_real_max_position_pct": (
                 settings.execution.autonomous_real_max_position_pct
             ),
