@@ -81,6 +81,15 @@ risk:
   max_position_notional_pct: 100.0
   max_spread_bps: 30.0
   max_entry_slippage_bps: 20.0
+
+  # Stops are market-invalidation levels, not a way to force larger sizing.
+  # Parquet rejects stops tighter than the largest applicable dynamic floor.
+  min_stop_distance_bps: 25.0
+  min_stop_spread_multiple: 3.0
+  min_stop_volatility_multiple: 4.0
+  min_stop_range_60m_fraction: 0.15
+  min_stop_recent_move_fraction: 0.25
+
   max_risk_snapshot_age_seconds: 120
   allow_duplicate_symbol_positions: false
 
