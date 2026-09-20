@@ -13,7 +13,13 @@ from parquet.storage import Storage
 from parquet.strategy import StrategyQueue
 
 _ALLOWED_PROVIDERS = {"local_ollama", "codex_cli"}
-_TERMINAL_EXECUTION_STATES = {"SHADOW_EXECUTED", "REJECTED", "BLOCKED", "RECONCILED"}
+_TERMINAL_EXECUTION_STATES = {
+    "SHADOW_EXECUTED",
+    "REJECTED",
+    "BLOCKED",
+    "PROTECTION_MISMATCH",
+    "RECONCILED",
+}
 _TERMINAL_EXECUTION_EVENTS = {
     "direct_proposal_execution_rejected",
     "direct_proposal_execution_blocked",
