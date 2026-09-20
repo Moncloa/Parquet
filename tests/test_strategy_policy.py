@@ -38,4 +38,7 @@ def test_policy_seeks_opportunities_without_forcing_trades() -> None:
     assert "nearby macro release is NOT a blanket veto" in prompt
     assert "NO TRADE does not require an empty watch list" in prompt
     assert "Never propose or watch Airbus / AIR.PA" in prompt
+    assert "Treat the stop-loss as the setup's genuine invalidation level" in prompt
+    assert "Never tighten a stop" in prompt
+    assert "risk_policy.stop_loss" in prompt
     assert '"request_id": "policy-test"' in prompt
