@@ -233,3 +233,122 @@ def test_broker_more_protective_stop_remains_synced(tmp_path) -> None:
 
     assert report.state == ReconciliationState.SYNCED
     assert report.trading_enabled is True
+
+
+
+def test_low_priced_asset_stop_mismatch_uses_relative_tolerance(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    manager = PositionManager(storage)
+    opened = datetime.now(UTC)
+    attempt = ExecutionAttempt(
+        attempt_id="attempt-ethfi",
+        proposal_id="proposal-ethfi",
+        watch_id="watch-ethfi",
+        symbol="ETHFI",
+        instrument_id=100010,
+        side="BUY",
+        amount_usd=5_000.0,
+        leverage=1,
+        settlement_type="real",
+        stop_loss=0.745,
+        take_profit=0.76,
+        created_at=opened,
+        updated_at=opened,
+        state=ExecutionAttemptState.RECONCILED,
+        broker_position_id="3581822752",
+    )
+    storage.save_execution_attempt(attempt)
+    manager.record_execution_position(
+        ManagedPosition(
+            local_id=attempt.attempt_id,
+            broker_position_id="3581822752",
+            proposal_id=attempt.proposal_id,
+            instrument_id=attempt.instrument_id,
+            symbol=attempt.symbol,
+            side=attempt.side,
+            opened_at=opened,
+            amount_usd=attempt.amount_usd,
+            leverage=1.0,
+            stop_loss_rate=0.675,
+            take_profit_rate=0.76,
+        )
+    )
+
+    report = manager.reconcile(
+        snapshot(
+            BrokerPosition(
+                position_id="3581822752",
+                instrument_id=100010,
+                symbol="ETHFI",
+                side="BUY",
+                amount_usd=5_000.0,
+                leverage=1.0,
+                open_rate=0.75,
+                stop_loss_rate=0.675,
+                take_profit_rate=0.76,
+            ),
+            at=opened + timedelta(seconds=5),
+        )
+    )
+
+    assert report.state == ReconciliationState.BLOCKED
+    assert [issue.code for issue in report.issues] == [
+        "BROKER_STOP_LOSS_MISMATCH"
+    ]
+
+
+def test_missing_broker_stop_blocks_reconciliation(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    manager = PositionManager(storage)
+    opened = datetime.now(UTC)
+    attempt = ExecutionAttempt(
+        attempt_id="attempt-missing-stop",
+        proposal_id="proposal-missing-stop",
+        watch_id="watch-missing-stop",
+        symbol="TEST",
+        instrument_id=123,
+        side="SELL",
+        amount_usd=100.0,
+        leverage=1,
+        settlement_type="CFD",
+        stop_loss=101.0,
+        take_profit=98.0,
+        created_at=opened,
+        updated_at=opened,
+        state=ExecutionAttemptState.RECONCILED,
+        broker_position_id="broker-missing-stop",
+    )
+    storage.save_execution_attempt(attempt)
+    manager.record_execution_position(
+        ManagedPosition(
+            local_id=attempt.attempt_id,
+            broker_position_id="broker-missing-stop",
+            proposal_id=attempt.proposal_id,
+            instrument_id=attempt.instrument_id,
+            symbol=attempt.symbol,
+            side=attempt.side,
+            opened_at=opened,
+        )
+    )
+
+    report = manager.reconcile(
+        snapshot(
+            BrokerPosition(
+                position_id="broker-missing-stop",
+                instrument_id=123,
+                symbol="TEST",
+                side="SELL",
+                amount_usd=100.0,
+                leverage=1.0,
+                open_rate=100.0,
+                stop_loss_rate=None,
+                take_profit_rate=98.0,
+            ),
+            at=opened + timedelta(seconds=5),
+        )
+    )
+
+    assert report.state == ReconciliationState.BLOCKED
+    assert [issue.code for issue in report.issues] == [
+        "BROKER_STOP_LOSS_MISMATCH"
+    ]
