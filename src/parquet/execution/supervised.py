@@ -238,7 +238,7 @@ class RealSmallExecutionAdapter:
             snapshot,
         )
         if protection_mismatch is not None:
-            actual_stop = protection_mismatch
+            actual_stop = protection_mismatch[1]
             return self._mark_protection_mismatch(
                 reconciling,
                 datetime.now(UTC),
@@ -636,7 +636,7 @@ def _is_transient_lookup_error(status_code: int) -> bool:
 def _broker_stop_protection_mismatch(
     attempt: ExecutionAttempt,
     snapshot: Any,
-) -> float | None:
+) -> tuple[float, float | None] | None:
     if snapshot is None or attempt.broker_position_id is None:
         return None
     for position in snapshot.positions:
@@ -647,7 +647,7 @@ def _broker_stop_protection_mismatch(
             expected_stop=attempt.stop_loss,
             actual_stop=position.stop_loss_rate,
         ):
-            return position.stop_loss_rate
+            return attempt.stop_loss, position.stop_loss_rate
         return None
     return None
 
