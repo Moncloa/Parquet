@@ -71,7 +71,7 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
                     datetime.now(UTC),
                     request_id=attempt.broker_request_id,
                     broker_order_id=attempt.broker_order_id,
-                    actual_stop=mismatch,
+                    actual_stop=mismatch[1],
                 )
 
             reconciled = attempt.model_copy(
