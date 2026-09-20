@@ -15,7 +15,13 @@ from parquet.execution.etoro import (
     EtoroIdentity,
     EtoroOrderLookupResult,
 )
-from parquet.portfolio import ManagedOrder, ManagedPosition, PositionManager, ReconciliationState
+from parquet.portfolio import (
+    ManagedOrder,
+    ManagedPosition,
+    PositionManager,
+    ReconciliationState,
+    stop_loss_is_worse,
+)
 from parquet.reconciliation import ReconciliationService
 from parquet.storage import Storage
 
@@ -227,6 +233,20 @@ class RealSmallExecutionAdapter:
         report = self.storage.get_reconciliation_report()
         snapshot = self.storage.get_broker_portfolio_snapshot()
 
+        protection_mismatch = _broker_stop_protection_mismatch(
+            reconciling,
+            snapshot,
+        )
+        if protection_mismatch is not None:
+            actual_stop = protection_mismatch
+            return self._mark_protection_mismatch(
+                reconciling,
+                datetime.now(UTC),
+                request_id=submission_request_id,
+                broker_order_id=broker_order_id,
+                actual_stop=actual_stop,
+            )
+
         if report is None or report.state != ReconciliationState.SYNCED:
             return self._mark_unknown(
                 reconciling,
@@ -250,7 +270,7 @@ class RealSmallExecutionAdapter:
             ExecutionAttemptState.RECONCILED,
             datetime.now(UTC),
         )
-        self.storage.set("execution_uncertain", "0")
+        self._clear_execution_uncertainty_if_resolved(reconciled.attempt_id)
         self.storage.add_event("real_execution_reconciled", reconciled.model_dump_json())
         return reconciled
 
@@ -518,6 +538,44 @@ class RealSmallExecutionAdapter:
         self.storage.add_event("real_execution_outcome_unknown", unknown.model_dump_json())
         return unknown
 
+
+    def _mark_protection_mismatch(
+        self,
+        attempt: ExecutionAttempt,
+        now: datetime,
+        *,
+        request_id: str | None,
+        broker_order_id: str | None,
+        actual_stop: float | None,
+    ) -> ExecutionAttempt:
+        expected = attempt.stop_loss
+        mismatch = attempt.model_copy(
+            update={
+                "state": ExecutionAttemptState.PROTECTION_MISMATCH,
+                "reason": (
+                    "broker_stop_loss_mismatch:"
+                    f"expected={expected}:actual={actual_stop}"
+                ),
+                "broker_request_id": request_id,
+                "broker_order_id": broker_order_id or attempt.broker_order_id,
+                "updated_at": now,
+            }
+        )
+        self.storage.save_execution_attempt(mismatch)
+        self._clear_execution_uncertainty_if_resolved(mismatch.attempt_id)
+        self.storage.add_event(
+            "real_execution_protection_mismatch",
+            mismatch.model_dump_json(),
+        )
+        return mismatch
+
+    def _clear_execution_uncertainty_if_resolved(self, attempt_id: str) -> None:
+        if not self.storage.has_execution_attempt_state(
+            ExecutionAttemptState.OUTCOME_UNKNOWN.value,
+            exclude_attempt_id=attempt_id,
+        ):
+            self.storage.set("execution_uncertain", "0")
+
     def _register_broker_identity(self, attempt: ExecutionAttempt, now: datetime) -> None:
         if attempt.broker_position_id is not None:
             self.position_manager.record_execution_position(
@@ -573,6 +631,25 @@ def _is_definite_submission_rejection(status_code: int) -> bool:
 
 def _is_transient_lookup_error(status_code: int) -> bool:
     return status_code in _TRANSIENT_LOOKUP_HTTP_STATUS_IDS or status_code >= 500
+
+
+def _broker_stop_protection_mismatch(
+    attempt: ExecutionAttempt,
+    snapshot: Any,
+) -> float | None:
+    if snapshot is None or attempt.broker_position_id is None:
+        return None
+    for position in snapshot.positions:
+        if position.position_id != attempt.broker_position_id:
+            continue
+        if stop_loss_is_worse(
+            side=attempt.side,
+            expected_stop=attempt.stop_loss,
+            actual_stop=position.stop_loss_rate,
+        ):
+            return position.stop_loss_rate
+        return None
+    return None
 
 
 def _broker_identity_visible(attempt: ExecutionAttempt, snapshot: Any) -> bool:
