@@ -379,6 +379,27 @@ class Storage:
             ).fetchall()
         return [ExecutionAttempt.model_validate_json(str(row[0])) for row in rows]
 
+
+    def has_execution_attempt_state(
+        self,
+        state: str,
+        *,
+        exclude_attempt_id: str | None = None,
+    ) -> bool:
+        with self._lock:
+            if exclude_attempt_id is None:
+                row = self.conn.execute(
+                    "SELECT 1 FROM execution_attempts WHERE state = ? LIMIT 1",
+                    (state,),
+                ).fetchone()
+            else:
+                row = self.conn.execute(
+                    "SELECT 1 FROM execution_attempts "
+                    "WHERE state = ? AND attempt_id != ? LIMIT 1",
+                    (state, exclude_attempt_id),
+                ).fetchone()
+        return row is not None
+
     def set_broker_portfolio_snapshot(self, snapshot: BrokerPortfolioSnapshot) -> None:
         self.set("broker_portfolio_snapshot", snapshot.model_dump_json())
 
