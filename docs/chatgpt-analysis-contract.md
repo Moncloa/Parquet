@@ -80,8 +80,10 @@ A `close_*` trigger should specify the timeframe when relevant.
 - `WATCH`: Parquet monitors the condition locally. `on_trigger=REASSESS` requests another strategy analysis.
 - `EXECUTE`: the watch must reference the exact `trade_proposals[].proposal_id`. Parquet never infers a proposal by symbol alone.
 - `TRADE_PROPOSAL`: this is never a broker order. Parquet persists the proposal and validates it again before execution.
-- The execution gate checks signal expiry/age, mandatory stop-loss, position/trade/loss limits, risk snapshot freshness, equity availability, duplicate-symbol exposure, quote freshness, spread, adverse entry slippage and deterministic position sizing.
-- Position sizing is controlled by Parquet from account equity, stop distance and configured risk limits. The strategy must not choose final account exposure.
+- The execution gate checks signal expiry/age, mandatory stop-loss, position/trade/loss limits, risk snapshot freshness, equity availability, duplicate-symbol exposure, quote freshness, spread, adverse entry slippage, stop realism and deterministic position sizing.
+- Stop realism is deterministic: the proposed stop must be on the protective side of the current executable quote and no tighter than the largest applicable floor derived from configured absolute distance, spread, recent step volatility, recent 60-minute range and recent 5/15-minute movement.
+- The deterministic stop floor is a minimum-noise bound, not a recommended stop. The strategy should place the stop at genuine setup invalidation and may choose a wider level when structure requires it.
+- Position sizing is controlled by Parquet from account equity, the current executable price, the approved stop distance and configured risk limits. A wider justified stop therefore reduces position size; the strategy must never tighten the stop to obtain a larger position.
 - `mode=shadow` never places an order.
 - `next_review`: the strategy may request an extraordinary future review. Structural reviews remain controlled by Parquet.
 - `NO TRADE`: use empty `watch` and `trade_proposals` arrays. This is a valid and expected result.
@@ -115,3 +117,18 @@ The strategy task should explicitly:
 10. Request `next_review` only for a concrete catalyst or unresolved market condition.
 11. Never choose final account exposure or override Parquet risk limits.
 12. Record useful current source URLs in `sources` and never reproduce credential-like strings.
+13. Treat `risk_policy.stop_loss` as a deterministic minimum-noise floor, not as the desired stop distance. Explain the structural invalidation used for every proposed stop.
+14. Never tighten a stop to increase position size or manufacture reward/risk. If a realistic invalidation makes the setup unattractive, return NO TRADE or REASSESS.
+
+
+## Post-fill protection verification
+
+For real execution, a broker-confirmed fill is not considered fully reconciled until the
+actual broker-side stop-loss is checked. If eToro reports a missing stop or a materially
+worse stop than the approved one, Parquet records `PROTECTION_MISMATCH` and keeps
+reconciliation blocked. This state is distinct from `OUTCOME_UNKNOWN`: the position is
+known to exist, but its protection is not the protection approved by the execution gate.
+
+A broker stop that is more protective than the approved stop is acceptable. Comparison
+uses a small relative tolerance so low-priced instruments are not masked by a large
+absolute-price tolerance.
