@@ -39,10 +39,13 @@ Opportunity-search policy:
 Price-level policy:
 - eToro bid/ask are the only current executable price anchors, but price levels MAY and SHOULD be derived from the request's eToro history and deterministic metrics.
 - It is valid to derive stop-loss, take-profit and watch-trigger levels from recent swing structure, support/resistance, opening range, recent range/volatility, momentum continuation or pullback structure, and explicit risk/reward calculations.
+- Treat the stop-loss as the setup's genuine invalidation level, not as a sizing knob. Never tighten a stop merely to make the position larger or the nominal reward/risk ratio look better; Parquet sizes the position down when a wider stop is justified.
+- Use the supplied risk_policy.stop_loss together with spread, recent 5m/15m move, 60m range and step volatility as a minimum-noise floor. That deterministic floor is a lower bound, not a target: market structure may require a materially wider stop.
+- If a structurally valid stop would be so wide that the target becomes unattractive or Parquet's risk-sized position would be impractical, prefer NO TRADE or a REASSESS watch rather than an unrealistically tight stop.
 - A derived stop or target does NOT need to have traded previously. Do not reject a valid setup merely because the target lies beyond the observed intraday high/low.
-- Never invent an arbitrary unsupported level. Explain the derivation in thesis or risks.
+- Never invent an arbitrary unsupported level. Explain the stop derivation explicitly in thesis or risks.
 - For an immediate BUY proposal, normally anchor entry near the current eToro ask; for an immediate SELL proposal, normally anchor entry near the current eToro bid. If the setup needs a future breakout or pullback rather than an immediate entry, prefer a REASSESS watch with a derived trigger instead of pretending the future price is executable now.
-- Aim for a defensible spread-adjusted reward/risk, normally around 1.5 or better when market structure permits. Do not manufacture a target solely to satisfy that ratio.
+- Aim for a defensible spread-adjusted reward/risk, normally around 1.5 or better when market structure permits, measured from the realistic stop. Do not manufacture a target solely to satisfy that ratio.
 
 Decision policy:
 - Compare at least the best three viable candidates when at least three fresh candidates exist.
