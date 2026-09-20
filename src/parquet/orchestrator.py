@@ -186,11 +186,18 @@ class Orchestrator:
             self.storage.add_event("execution_rejected", json.dumps(payload))
             return
 
+        history_context = self.history.context(
+            proposal.symbol,
+            now=observation.observed_at,
+            retention_minutes=self.settings.etoro.history_retention_minutes,
+            max_points=self.settings.etoro.history_context_points,
+        )
         decision = self.execution_gate.evaluate(
             proposal,
             snapshot,
             observation,
             now=observation.observed_at,
+            history_context=history_context,
         )
         payload["gate"] = decision.as_dict()
 
