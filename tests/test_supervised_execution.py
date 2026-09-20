@@ -256,7 +256,7 @@ def _autonomous_adapter(tmp_path, client, snapshots):
     return adapter, storage, reconciliation
 
 
-def _filled_snapshot() -> BrokerPortfolioSnapshot:
+def _filled_snapshot(*, stop_loss_rate: float = 29_400.0) -> BrokerPortfolioSnapshot:
     return _snapshot(
         positions=[
             BrokerPosition(
@@ -266,7 +266,7 @@ def _filled_snapshot() -> BrokerPortfolioSnapshot:
                 side="buy",
                 amount_usd=10.0,
                 leverage=2,
-                stop_loss_rate=29_400.0,
+                stop_loss_rate=stop_loss_rate,
                 take_profit_rate=29_600.0,
             )
         ]
@@ -301,6 +301,37 @@ async def test_supervised_real_success_reconciles_position(tmp_path) -> None:
     assert len(managed) == 1
     assert managed[0].broker_position_id == "pos-1"
     assert managed[0].leverage == 2
+
+
+@pytest.mark.asyncio
+async def test_filled_position_with_worse_broker_stop_is_protection_mismatch(
+    tmp_path,
+) -> None:
+    client = SuccessClient()
+    adapter, storage, reconciliation = _adapter(
+        tmp_path,
+        client,
+        [_snapshot(), _filled_snapshot(stop_loss_rate=29_000.0)],
+    )
+
+    result = await adapter.execute(
+        _attempt(),
+        confirmation="REAL attempt-1",
+    )
+
+    assert reconciliation.calls == 2
+    assert result.state == ExecutionAttemptState.PROTECTION_MISMATCH
+    assert result.broker_position_id == "pos-1"
+    assert result.reason == (
+        "broker_stop_loss_mismatch:expected=29400.0:actual=29000.0"
+    )
+    assert storage.get("execution_uncertain") == "0"
+    report = storage.get_reconciliation_report()
+    assert report is not None
+    assert report.state.value == "BLOCKED"
+    assert [issue.code for issue in report.issues] == [
+        "BROKER_STOP_LOSS_MISMATCH"
+    ]
 
 
 @pytest.mark.asyncio
