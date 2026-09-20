@@ -482,6 +482,11 @@ def _gate_summary(gate_raw: Any, preflight_raw: Any) -> str:
         bits.append(f'gate {_money(gate.get("amount_usd"))}')
     if gate.get("spread_bps") is not None:
         bits.append(f'spread {_num(gate.get("spread_bps"))} bps')
+    if gate.get("stop_distance_bps") is not None:
+        stop_text = f'SL {_num(gate.get("stop_distance_bps"))} bps'
+        if gate.get("minimum_stop_distance_bps") is not None:
+            stop_text += f' / min {_num(gate.get("minimum_stop_distance_bps"))}'
+        bits.append(stop_text)
     if preflight.get("chosen_virtual_capital_usd") is not None:
         bits.append(f'chosen {_money(preflight.get("chosen_virtual_capital_usd"))}')
     if preflight.get("what_if_total_cost_usd") is not None:

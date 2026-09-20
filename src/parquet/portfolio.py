@@ -9,6 +9,29 @@ from pydantic import BaseModel, Field
 _POST_TRADE_VISIBILITY_GRACE_SECONDS = 20.0
 
 
+def stop_loss_is_worse(
+    *,
+    side: str,
+    expected_stop: float,
+    actual_stop: float | None,
+    tolerance_bps: float = 10.0,
+) -> bool:
+    """Return True when broker protection is missing or materially worse.
+
+    A relative tolerance avoids the old absolute 0.01 price tolerance, which was
+    far too permissive for low-priced instruments.
+    """
+    if actual_stop is None:
+        return True
+    normalized_side = side.strip().upper()
+    tolerance = max(1e-9, abs(expected_stop) * tolerance_bps / 10_000)
+    if normalized_side == "BUY":
+        return actual_stop < expected_stop - tolerance
+    if normalized_side == "SELL":
+        return actual_stop > expected_stop + tolerance
+    return True
+
+
 class ReconciliationState(StrEnum):
     SYNCED = "SYNCED"
     BLOCKED = "BLOCKED"
@@ -174,16 +197,11 @@ class PositionManager:
             if expected_stop is not None:
                 actual_stop = broker.stop_loss_rate
                 side = local.side.strip().upper()
-                tolerance = max(0.01, abs(expected_stop) * 0.001)
-                stop_missing = actual_stop is None
-                stop_worse = (
-                    actual_stop is not None
-                    and (
-                        (side == "BUY" and actual_stop < expected_stop - tolerance)
-                        or (side == "SELL" and actual_stop > expected_stop + tolerance)
-                    )
-                )
-                if stop_missing or stop_worse:
+                if stop_loss_is_worse(
+                    side=side,
+                    expected_stop=expected_stop,
+                    actual_stop=actual_stop,
+                ):
                     issues.append(
                         ReconciliationIssue(
                             code="BROKER_STOP_LOSS_MISMATCH",

@@ -105,11 +105,18 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
                     continue
 
                 observation = await self._proposal_observation(proposal)
+                history_context = self.history.context(
+                    proposal.symbol,
+                    now=current,
+                    retention_minutes=self.settings.etoro.history_retention_minutes,
+                    max_points=self.settings.etoro.history_context_points,
+                )
                 decision = self.execution_gate.evaluate(
                     proposal,
                     snapshot,
                     observation,
                     now=current,
+                    history_context=history_context,
                 )
                 payload["observation"] = observation.model_dump(mode="json")
                 payload["gate"] = decision.as_dict()
@@ -185,11 +192,19 @@ class AutonomousOrchestrator(EnhancedAutonomousOrchestrator):
             raise RuntimeError("Risk snapshot unavailable after forced reconciliation")
 
         observation = await self._proposal_observation(proposal)
+        gate_now = datetime.now(UTC)
+        history_context = self.history.context(
+            proposal.symbol,
+            now=gate_now,
+            retention_minutes=self.settings.etoro.history_retention_minutes,
+            max_points=self.settings.etoro.history_context_points,
+        )
         decision = self.execution_gate.evaluate(
             proposal,
             snapshot,
             observation,
-            now=datetime.now(UTC),
+            now=gate_now,
+            history_context=history_context,
         )
         payload["observation"] = observation.model_dump(mode="json")
         payload["gate"] = decision.as_dict()

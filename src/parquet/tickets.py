@@ -225,11 +225,18 @@ async def prepare_real_small_ticket(
     rate = await _current_rate(market, instrument_id)
     observation = _observation(proposal, rate, instrument_id)
     now = datetime.now(UTC)
+    history_context = orchestrator.history.context(
+        proposal.symbol,
+        now=now,
+        retention_minutes=settings.etoro.history_retention_minutes,
+        max_points=settings.etoro.history_context_points,
+    )
     decision = orchestrator.execution_gate.evaluate(
         proposal,
         snapshot,
         observation,
         now=now,
+        history_context=history_context,
     )
     if not decision.approved:
         reasons = ", ".join(decision.reasons) or "unknown"

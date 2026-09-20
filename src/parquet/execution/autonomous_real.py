@@ -4,7 +4,10 @@ import asyncio
 from datetime import UTC, datetime
 
 from parquet.execution.autonomous import ExecutionAttempt, ExecutionAttemptState
-from parquet.execution.supervised import RealSmallExecutionAdapter
+from parquet.execution.supervised import (
+    RealSmallExecutionAdapter,
+    _broker_stop_protection_mismatch,
+)
 from parquet.portfolio import ReconciliationState
 
 
@@ -26,7 +29,6 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
         result = await super().execute(attempt, confirmation=confirmation, now=now)
         if (
             result.state == ExecutionAttemptState.OUTCOME_UNKNOWN
-            and result.reason == "filled_position_not_visible_after_reconciliation"
             and result.broker_position_id is not None
         ):
             return await self._recover_delayed_position_visibility(result)
@@ -52,29 +54,45 @@ class AutonomousRealExecutionAdapter(RealSmallExecutionAdapter):
             await self.reconciliation.poll_once(force=True)
             report = self.storage.get_reconciliation_report()
             snapshot = self.storage.get_broker_portfolio_snapshot()
-            if (
-                report is not None
-                and report.state == ReconciliationState.SYNCED
-                and snapshot is not None
+            position_visible = (
+                snapshot is not None
                 and any(
                     position.position_id == attempt.broker_position_id
                     for position in snapshot.positions
                 )
-            ):
-                reconciled = attempt.model_copy(
-                    update={
-                        "state": ExecutionAttemptState.RECONCILED,
-                        "reason": None,
-                        "updated_at": datetime.now(UTC),
-                    }
+            )
+            if not position_visible:
+                continue
+
+            mismatch = _broker_stop_protection_mismatch(attempt, snapshot)
+            if mismatch is not None:
+                return self._mark_protection_mismatch(
+                    attempt,
+                    datetime.now(UTC),
+                    request_id=attempt.broker_request_id,
+                    broker_order_id=attempt.broker_order_id,
+                    actual_stop=mismatch[1],
                 )
-                self.storage.save_execution_attempt(reconciled)
-                self.storage.set("execution_uncertain", "0")
-                self.storage.add_event(
-                    "autonomous_real_delayed_reconciliation_recovered",
-                    reconciled.model_dump_json(),
-                )
-                return reconciled
+
+            reconciled = attempt.model_copy(
+                update={
+                    "state": ExecutionAttemptState.RECONCILED,
+                    "reason": (
+                        None
+                        if report is not None
+                        and report.state == ReconciliationState.SYNCED
+                        else "position_visible_while_global_reconciliation_blocked"
+                    ),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            self.storage.save_execution_attempt(reconciled)
+            self._clear_execution_uncertainty_if_resolved(reconciled.attempt_id)
+            self.storage.add_event(
+                "autonomous_real_delayed_reconciliation_recovered",
+                reconciled.model_dump_json(),
+            )
+            return reconciled
         return attempt
 
     def _assert_supervised_allowed(

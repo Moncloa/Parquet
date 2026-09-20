@@ -147,6 +147,11 @@ class RiskConfig(BaseModel):
     max_position_notional_pct: float = Field(default=100.0, gt=0, le=100)
     max_spread_bps: float = Field(default=30.0, gt=0)
     max_entry_slippage_bps: float = Field(default=20.0, ge=0)
+    min_stop_distance_bps: float = Field(default=25.0, ge=0)
+    min_stop_spread_multiple: float = Field(default=3.0, ge=0)
+    min_stop_volatility_multiple: float = Field(default=4.0, ge=0)
+    min_stop_range_60m_fraction: float = Field(default=0.15, ge=0, le=1)
+    min_stop_recent_move_fraction: float = Field(default=0.25, ge=0, le=1)
     max_risk_snapshot_age_seconds: int = Field(default=120, ge=1, le=3600)
     allow_duplicate_symbol_positions: bool = False
 
