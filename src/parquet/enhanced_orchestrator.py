@@ -384,6 +384,23 @@ class AutonomousOrchestrator(BaseAutonomousOrchestrator):
                 },
             }
 
+        context["risk_policy"] = {
+            "max_risk_per_trade_pct": self.settings.risk.max_risk_per_trade_pct,
+            "stop_loss": {
+                "absolute_floor_bps": self.settings.risk.min_stop_distance_bps,
+                "spread_multiple": self.settings.risk.min_stop_spread_multiple,
+                "step_volatility_multiple": (
+                    self.settings.risk.min_stop_volatility_multiple
+                ),
+                "range_60m_fraction": self.settings.risk.min_stop_range_60m_fraction,
+                "recent_move_fraction": self.settings.risk.min_stop_recent_move_fraction,
+                "principle": (
+                    "place the stop at genuine market invalidation; never tighten "
+                    "it to obtain a larger position"
+                ),
+            },
+        }
+
         count = 0
         for review in due:
             request_payload_context = dict(context)
