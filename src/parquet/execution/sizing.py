@@ -39,41 +39,65 @@ def choose_autonomous_real_terms(
             f"eToro offers no {direction.upper()} leverage at or below x{max_leverage}"
         )
 
+    # The risk gate defines the desired/maximum exposure. Capital allocation and
+    # leverage are implementation details: choose the *lowest* supported leverage
+    # that can express as much of that risk-approved exposure as possible without
+    # exceeding the configured capital cap. This prevents leverage from becoming a
+    # hidden risk multiplier while avoiding needless under-exposure when x1 is
+    # capital-constrained.
     diagnostics: list[str] = []
+    candidates: list[tuple[float, int, str, float | None, float, float]] = []
     for leverage in allowed:
-        maximum_safe = min(
-            maximum_capital_usd,
-            gate_maximum_notional_usd / leverage,
-        )
-        if maximum_safe + 1e-9 < minimum_capital_usd:
-            diagnostics.append(
-                f"x{leverage}: risk-safe capital {maximum_safe:.2f} USD is below "
-                f"autonomous minimum {minimum_capital_usd:.2f} USD"
-            )
-            continue
-
         broker_minimum = eligibility.minimum_amount(
             direction=direction,
             leverage=leverage,
         )
-        if broker_minimum is not None and broker_minimum > maximum_safe + 1e-9:
-            diagnostics.append(
-                f"x{leverage}: broker minimum {broker_minimum:.2f} USD exceeds "
-                f"risk-safe capital {maximum_safe:.2f} USD"
-            )
-            continue
-
         settlement_type = eligibility.settlement_type(
             direction=direction,
             leverage=leverage,
         )
-        chosen_amount = maximum_safe
+        capital_needed = gate_maximum_notional_usd / leverage
+        chosen_capital = min(maximum_capital_usd, capital_needed)
+        if chosen_capital + 1e-9 < minimum_capital_usd:
+            diagnostics.append(
+                f"x{leverage}: required capital {chosen_capital:.2f} USD is below "
+                f"autonomous minimum {minimum_capital_usd:.2f} USD"
+            )
+            continue
+        if broker_minimum is not None and broker_minimum > chosen_capital + 1e-9:
+            diagnostics.append(
+                f"x{leverage}: broker minimum {broker_minimum:.2f} USD exceeds "
+                f"risk-safe capital {chosen_capital:.2f} USD"
+            )
+            continue
+
+        exposure = min(gate_maximum_notional_usd, chosen_capital * leverage)
+        candidates.append(
+            (
+                exposure,
+                leverage,
+                settlement_type,
+                broker_minimum,
+                chosen_capital,
+                capital_needed,
+            )
+        )
+
+    if candidates:
+        best_exposure = max(item[0] for item in candidates)
+        # Among configurations reaching the best risk-approved exposure, use the
+        # least leverage. If no leverage can reach the full desired exposure, this
+        # selects the one that gets closest without exceeding it.
+        viable = [item for item in candidates if abs(item[0] - best_exposure) <= 1e-9]
+        exposure, leverage, settlement_type, broker_minimum, capital, capital_needed = min(
+            viable, key=lambda item: item[1]
+        )
         return (
             leverage,
             settlement_type,
             broker_minimum,
-            chosen_amount,
-            maximum_safe,
+            capital,
+            capital_needed,
         )
 
     detail = "; ".join(diagnostics) or "no viable broker configuration"
