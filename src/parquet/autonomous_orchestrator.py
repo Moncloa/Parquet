@@ -907,11 +907,24 @@ class AutonomousOrchestrator(Orchestrator):
                     edge.reason or "net_edge_rejected",
                 )
 
+        initial_net_risk_usd = None
+        estimated_open_cost_usd = 0.0
+        if self.settings.risk.net_edge_enabled:
+            estimated_open_cost_usd = max(0.0, costs.total_usd)
+            if proposal.stop_loss is not None and decision.execution_price is not None:
+                stop_fraction = abs(decision.execution_price - proposal.stop_loss) / decision.execution_price
+                initial_net_risk_usd = (
+                    capital * leverage * stop_fraction
+                    + estimated_open_cost_usd
+                )
+
         refreshed = attempt.model_copy(
             update={
                 "amount_usd": capital,
                 "leverage": leverage,
                 "settlement_type": settlement_type,
+                "estimated_open_cost_usd": estimated_open_cost_usd,
+                "initial_net_risk_usd": initial_net_risk_usd,
                 "updated_at": datetime.now(UTC),
             }
         )
