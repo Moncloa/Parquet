@@ -31,6 +31,7 @@ from parquet.models import (
 from parquet.orchestrator import Orchestrator
 from parquet.portfolio import PositionManager
 from parquet.reconciliation import ReconciliationService
+from parquet.scheduler import ScheduledReview
 
 _WIDE_MIN_SAMPLES = 10
 _WIDE_MIN_SPAN_SECONDS = 120.0
@@ -579,8 +580,6 @@ class AutonomousOrchestrator(Orchestrator):
                     f"gate_reassessment:{proposal.symbol.upper()}",
                     json.dumps(reason_payload),
                 )
-                from parquet.scheduler import ScheduledReview
-
                 self.storage.schedule_review(
                     ScheduledReview(
                         at=observation.observed_at.astimezone(UTC),
