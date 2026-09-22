@@ -33,9 +33,9 @@ _OUTCOME_BY_KIND = {
 
 def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str, Any]:
     storage = orchestrator.storage
-    analyses = _recent_analyses(storage, limit=10)
+    analyses = _recent_analyses(storage, limit=50)
     review_requests = _recent_review_requests(storage, limit=100)
-    decisions = _recent_decisions(storage, limit=30)
+    decisions = _recent_decisions(storage, limit=100)
     decisions.extend(_no_trade_decisions(analyses, review_requests))
     decisions.sort(key=lambda item: str(item.get("at") or ""), reverse=True)
 
@@ -43,7 +43,17 @@ def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str
     open_positions = [position_payload(item) for item in positions if item.status == "OPEN"]
     closed_positions = [
         position_payload(item) for item in positions if item.status != "OPEN"
-    ][:20]
+    ][:50]
+    watch_history = _watch_history(storage, analyses=analyses, limit=100)
+    watch_events = _recent_watch_events(storage, limit=100)
+    timeline = _timeline_events(
+        analyses=analyses,
+        review_requests=review_requests,
+        decisions=decisions,
+        positions=positions,
+        watch_history=watch_history,
+        watch_events=watch_events,
+    )
 
     risk = storage.get_risk_snapshot()
     broker = storage.get_broker_portfolio_snapshot()
@@ -123,12 +133,15 @@ def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str
             _analysis_payload(analysis, review_requests.get(analysis.review_request_id or ""))
             for analysis in analyses
         ],
-        "decisions": decisions[:30],
+        "decisions": decisions[:100],
         "positions": {
             "open": open_positions,
             "closed": closed_positions,
         },
         "watches": [watch.model_dump(mode="json") for watch in watches],
+        "watch_history": watch_history,
+        "watch_events": watch_events,
+        "timeline": timeline[:150],
         "attempts": [attempt.model_dump(mode="json") for attempt in attempts],
         "system": {
             "reconciliation_state": None if reconciliation is None else reconciliation.state.value,
@@ -252,7 +265,7 @@ def _recent_decisions(storage: Any, *, limit: int) -> list[dict[str, Any]]:
 
         decisions.append(
             {
-                "at": str(created_at),
+                "at": _iso_timestamp(created_at),
                 "kind": str(kind),
                 "outcome": _OUTCOME_BY_KIND.get(str(kind), str(kind).upper()),
                 "symbol": payload.get("symbol") or attempt_payload.get("symbol"),
@@ -309,3 +322,269 @@ def _operational_controls_enabled(settings: Settings) -> bool:
     if execution.autonomous_mode == "demo":
         return execution.autonomous_demo_enabled
     return execution.autonomous_mode == "shadow"
+
+
+
+def _watch_history(
+    storage: Any,
+    *,
+    analyses: list[MarketAnalysis],
+    limit: int,
+) -> list[dict[str, Any]]:
+    analysis_times = {
+        analysis.analysis_id: analysis.generated_at.astimezone(UTC).isoformat()
+        for analysis in analyses
+    }
+    with storage._lock:
+        rows = storage.conn.execute(
+            "SELECT watch_id, analysis_id, status, payload "
+            "FROM watches ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    result: list[dict[str, Any]] = []
+    for watch_id, analysis_id, status, raw_payload in rows:
+        try:
+            payload = json.loads(str(raw_payload))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload = dict(payload)
+        payload["watch_id"] = str(watch_id)
+        payload["analysis_id"] = str(analysis_id)
+        payload["status"] = str(status)
+        payload["created_at"] = analysis_times.get(str(analysis_id))
+        result.append(payload)
+    return result
+
+
+def _recent_watch_events(storage: Any, *, limit: int) -> list[dict[str, Any]]:
+    with storage._lock:
+        rows = storage.conn.execute(
+            "SELECT created_at, payload FROM events WHERE kind = 'watch_event' "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    result: list[dict[str, Any]] = []
+    for created_at, raw_payload in rows:
+        try:
+            payload = json.loads(str(raw_payload))
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        item = dict(payload)
+        item["at"] = _iso_timestamp(payload.get("observed_at") or created_at)
+        result.append(item)
+    return result
+
+
+def _timeline_events(
+    *,
+    analyses: list[MarketAnalysis],
+    review_requests: dict[str, dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    positions: list[Any],
+    watch_history: list[dict[str, Any]],
+    watch_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+
+    for request_id, request in review_requests.items():
+        requested_at = request.get("requested_at")
+        if requested_at is None:
+            continue
+        items.append(
+            {
+                "id": f"review-request:{request_id}",
+                "at": _iso_timestamp(requested_at),
+                "family": "review",
+                "event": "REVIEW_REQUESTED",
+                "title": "Revisión solicitada",
+                "symbol": None,
+                "summary": str(request.get("reason") or "review"),
+                "detail": str(request_id),
+            }
+        )
+
+    for analysis in analyses:
+        request = review_requests.get(analysis.review_request_id or "", {})
+        proposal_symbols = ", ".join(
+            proposal.symbol for proposal in analysis.trade_proposals
+        )
+        items.append(
+            {
+                "id": f"review:{analysis.analysis_id}",
+                "at": analysis.generated_at.astimezone(UTC).isoformat(),
+                "family": "review",
+                "event": "REVIEW_COMPLETED",
+                "title": "Revisión completada",
+                "symbol": None,
+                "summary": analysis.summary or "Sin resumen",
+                "detail": (
+                    f"{request.get('reason') or analysis.market_regime}"
+                    + (f" · propuestas: {proposal_symbols}" if proposal_symbols else "")
+                ),
+                "analysis_id": analysis.analysis_id,
+            }
+        )
+
+    for decision in decisions:
+        outcome = str(decision.get("outcome") or "UNKNOWN")
+        reasons = decision.get("reasons")
+        reason_text = (
+            " · ".join(str(reason) for reason in reasons if reason)
+            if isinstance(reasons, list)
+            else ""
+        )
+        items.append(
+            {
+                "id": (
+                    "decision:"
+                    + str(
+                        decision.get("proposal_id")
+                        or decision.get("analysis_id")
+                        or decision.get("at")
+                    )
+                    + ":"
+                    + outcome
+                ),
+                "at": _iso_timestamp(decision.get("at")),
+                "family": "decision",
+                "event": outcome,
+                "title": "Decisión",
+                "symbol": decision.get("symbol"),
+                "summary": reason_text or outcome,
+                "detail": str(
+                    decision.get("proposal_id")
+                    or decision.get("analysis_id")
+                    or ""
+                ),
+                "gate": decision.get("gate") or {},
+                "preflight": decision.get("preflight") or {},
+            }
+        )
+
+    for watch in watch_history:
+        created_at = watch.get("created_at")
+        if created_at is None:
+            continue
+        trigger = watch.get("trigger")
+        trigger_payload = trigger if isinstance(trigger, dict) else {}
+        trigger_text = (
+            f"{trigger_payload.get('type') or 'trigger'} "
+            f"{trigger_payload.get('price') or ''}"
+        ).strip()
+        items.append(
+            {
+                "id": f"watch-created:{watch.get('watch_id')}",
+                "at": _iso_timestamp(created_at),
+                "family": "watch",
+                "event": "WATCH_CREATED",
+                "title": "Watch creado",
+                "symbol": watch.get("symbol"),
+                "summary": str(watch.get("rationale") or trigger_text or "Watch"),
+                "detail": (
+                    f"{trigger_text} → {watch.get('on_trigger') or 'REASSESS'}"
+                ),
+            }
+        )
+
+    for event in watch_events:
+        event_name = str(event.get("event") or "WATCH_EVENT")
+        items.append(
+            {
+                "id": (
+                    f"watch-event:{event.get('watch_id')}:"
+                    f"{event_name}:{event.get('at')}"
+                ),
+                "at": _iso_timestamp(event.get("at")),
+                "family": "watch",
+                "event": event_name,
+                "title": "Watch " + event_name.lower().replace("_", " "),
+                "symbol": event.get("symbol"),
+                "summary": str(event.get("reason") or event_name),
+                "detail": (
+                    f"price {event.get('observed_price')}"
+                    + (
+                        f" → {event.get('action')}"
+                        if event.get("action") is not None
+                        else ""
+                    )
+                ),
+            }
+        )
+
+    for position in positions:
+        opened = position.opened_at.astimezone(UTC).isoformat()
+        items.append(
+            {
+                "id": f"position-open:{position.local_id}",
+                "at": opened,
+                "family": "position_open",
+                "event": "POSITION_OPENED",
+                "title": "Posición abierta",
+                "symbol": position.symbol,
+                "summary": (
+                    f"{position.side.upper()} · capital "
+                    f"{position.amount_usd:,.2f} USD"
+                ),
+                "detail": (
+                    f"open {position.open_rate if position.open_rate is not None else '—'}"
+                    f" · SL {position.stop_loss_rate if position.stop_loss_rate is not None else '—'}"
+                    f" · TP {position.take_profit_rate if position.take_profit_rate is not None else '—'}"
+                ),
+                "position_id": position.broker_position_id,
+            }
+        )
+        if position.closed_at is not None:
+            pnl = (
+                "—"
+                if position.realized_pnl_usd is None
+                else f"{position.realized_pnl_usd:+,.2f} USD"
+            )
+            items.append(
+                {
+                    "id": f"position-close:{position.local_id}",
+                    "at": position.closed_at.astimezone(UTC).isoformat(),
+                    "family": "position_close",
+                    "event": "POSITION_CLOSED",
+                    "title": "Posición cerrada",
+                    "symbol": position.symbol,
+                    "summary": f"{position.side.upper()} · P/L {pnl}",
+                    "detail": (
+                        "resultado estimado"
+                        if position.pnl_estimated
+                        else "resultado registrado"
+                    ),
+                    "position_id": position.broker_position_id,
+                }
+            )
+
+    return sorted(
+        items,
+        key=lambda item: _timeline_sort_key(item.get("at")),
+        reverse=True,
+    )
+
+
+def _timeline_sort_key(value: object) -> datetime:
+    text_value = str(value or "")
+    try:
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _iso_timestamp(value: object) -> str:
+    if value is None:
+        return ""
+    parsed = _timeline_sort_key(value)
+    if parsed == datetime.min.replace(tzinfo=UTC):
+        return str(value)
+    return parsed.isoformat()
