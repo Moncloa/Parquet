@@ -443,6 +443,20 @@ class AutonomousOrchestrator(Orchestrator):
                     }
                 }
 
+        gate_reassessments: dict[str, object] = {}
+        for symbol in review_symbols:
+            raw_gate = self.storage.get(f"gate_reassessment:{symbol.upper()}")
+            if not raw_gate:
+                continue
+            try:
+                parsed_gate = json.loads(raw_gate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed_gate, dict):
+                gate_reassessments[symbol.upper()] = parsed_gate
+        if gate_reassessments:
+            context["gate_reassessments"] = gate_reassessments
+
         market_data = context.get("market_data")
         if isinstance(market_data, dict):
             market_data["wide_scanner"] = stream_context
