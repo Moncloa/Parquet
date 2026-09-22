@@ -63,3 +63,85 @@ def evaluate_net_exit(
         initial_net_risk_usd=initial_net_risk_usd,
         net_r_multiple=net_r,
     )
+
+
+@dataclass(frozen=True)
+class ProtectiveStopDecision:
+    approved: bool
+    reason: str
+    stop_rate: float | None
+    locked_net_profit_usd: float
+    required_gross_pnl_usd: float
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def calculate_protective_stop(
+    *,
+    side: str,
+    open_rate: float,
+    current_executable_price: float,
+    current_stop_rate: float | None,
+    exposure_usd: float,
+    estimated_open_cost_usd: float,
+    estimated_close_cost_usd: float,
+    initial_net_risk_usd: float,
+    lock_net_r: float = 0.0,
+) -> ProtectiveStopDecision:
+    """Return a cost-aware, non-worsening stop that locks a minimum net R.
+
+    The returned level is advisory only: this function performs no broker write.
+    For a long, executable P&L is measured against bid; for a short, against ask,
+    so callers must pass the corresponding executable price.
+    """
+    if open_rate <= 0 or current_executable_price <= 0 or exposure_usd <= 0:
+        raise ValueError("prices and exposure must be positive")
+    if estimated_open_cost_usd < 0 or estimated_close_cost_usd < 0:
+        raise ValueError("estimated costs must be non-negative")
+    if initial_net_risk_usd <= 0 or lock_net_r < 0:
+        raise ValueError("initial net risk must be positive and lock_net_r non-negative")
+
+    normalized = side.upper()
+    if normalized not in {"BUY", "SELL"}:
+        raise ValueError("side must be BUY or SELL")
+
+    locked_net_profit = initial_net_risk_usd * lock_net_r
+    required_gross_pnl = (
+        locked_net_profit + estimated_open_cost_usd + estimated_close_cost_usd
+    )
+    move_fraction = required_gross_pnl / exposure_usd
+    if normalized == "BUY":
+        candidate = open_rate * (1.0 + move_fraction)
+        if candidate >= current_executable_price:
+            return ProtectiveStopDecision(
+                False, "protective_stop_not_below_executable_price", None,
+                locked_net_profit, required_gross_pnl,
+            )
+        if current_stop_rate is not None and candidate <= current_stop_rate:
+            return ProtectiveStopDecision(
+                False, "protective_stop_would_not_improve", None,
+                locked_net_profit, required_gross_pnl,
+            )
+    else:
+        candidate = open_rate * (1.0 - move_fraction)
+        if candidate <= 0:
+            return ProtectiveStopDecision(
+                False, "protective_stop_invalid", None,
+                locked_net_profit, required_gross_pnl,
+            )
+        if candidate <= current_executable_price:
+            return ProtectiveStopDecision(
+                False, "protective_stop_not_above_executable_price", None,
+                locked_net_profit, required_gross_pnl,
+            )
+        if current_stop_rate is not None and candidate >= current_stop_rate:
+            return ProtectiveStopDecision(
+                False, "protective_stop_would_not_improve", None,
+                locked_net_profit, required_gross_pnl,
+            )
+
+    return ProtectiveStopDecision(
+        True, "protective_stop_available", candidate,
+        locked_net_profit, required_gross_pnl,
+    )
