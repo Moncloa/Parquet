@@ -13,6 +13,8 @@ from parquet.execution.autonomous import (
 )
 from parquet.execution.demo import DemoExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
+from parquet.execution.net_edge import evaluate_net_edge
+from parquet.execution.net_exit import calculate_protective_stop, evaluate_net_exit
 from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.models import (
@@ -29,6 +31,7 @@ from parquet.models import (
 from parquet.orchestrator import Orchestrator
 from parquet.portfolio import PositionManager
 from parquet.reconciliation import ReconciliationService
+from parquet.scheduler import ScheduledReview
 
 _WIDE_MIN_SAMPLES = 10
 _WIDE_MIN_SPAN_SECONDS = 120.0
@@ -441,6 +444,20 @@ class AutonomousOrchestrator(Orchestrator):
                     }
                 }
 
+        gate_reassessments: dict[str, object] = {}
+        for symbol in review_symbols:
+            raw_gate = self.storage.get(f"gate_reassessment:{symbol.upper()}")
+            if not raw_gate:
+                continue
+            try:
+                parsed_gate = json.loads(raw_gate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed_gate, dict):
+                gate_reassessments[symbol.upper()] = parsed_gate
+        if gate_reassessments:
+            context["gate_reassessments"] = gate_reassessments
+
         market_data = context.get("market_data")
         if isinstance(market_data, dict):
             market_data["wide_scanner"] = stream_context
@@ -527,6 +544,53 @@ class AutonomousOrchestrator(Orchestrator):
         payload["gate"] = decision.as_dict()
         if not decision.approved:
             self.storage.add_event("execution_rejected", json.dumps(payload))
+            if "stop_too_tight_for_market" in decision.reasons:
+                # This proposal's structural stop is incompatible with the current
+                # noise regime. Do not keep retrying the same immutable proposal.
+                self.storage.set_watch_status(watch.watch_id, "REASSESS_REQUIRED")
+                floor = decision.minimum_stop_distance_bps
+                stop = decision.stop_distance_bps
+                components = decision.stop_floor_components or {}
+                dominant = (
+                    max(components.items(), key=lambda item: item[1])
+                    if components
+                    else None
+                )
+                reason_payload = {
+                    "proposal_id": proposal.proposal_id,
+                    "symbol": proposal.symbol,
+                    "reason": "stop_too_tight_for_market",
+                    "stop_distance_bps": stop,
+                    "minimum_stop_distance_bps": floor,
+                    "stop_floor_components": components,
+                    "dominant_stop_floor": (
+                        None
+                        if dominant is None
+                        else {"component": dominant[0], "bps": dominant[1]}
+                    ),
+                    "instruction": (
+                        "Reassess current market regime. Treat the stop floor as a "
+                        "noise lower bound, not a target. Test whether the recent "
+                        "tradable range/oscillation can support a structural stop, "
+                        "round-trip costs and sufficient net reward/risk. Generate a "
+                        "new proposal only if the net edge survives; otherwise NO TRADE."
+                    ),
+                }
+                self.storage.set(
+                    f"gate_reassessment:{proposal.symbol.upper()}",
+                    json.dumps(reason_payload),
+                )
+                self.storage.schedule_review(
+                    ScheduledReview(
+                        at=observation.observed_at.astimezone(UTC),
+                        reason=f"gate_reassess:{proposal.symbol}:stop_too_tight_for_market",
+                        source="gate",
+                    )
+                )
+                self.storage.add_event(
+                    "gate_reassessment_requested",
+                    json.dumps(reason_payload),
+                )
             return
 
         if not self.settings.execution.autonomous_enabled:
@@ -612,6 +676,7 @@ class AutonomousOrchestrator(Orchestrator):
         processed = await super().poll_market_once(now)
         await self._process_demo_pending(now)
         await self._process_real_pending(now)
+        await self._process_real_exits(now)
         return processed
 
     async def _process_demo_pending(self, now: datetime | None = None) -> int:
@@ -851,11 +916,77 @@ class AutonomousOrchestrator(Orchestrator):
                 f"real_broker_preflight:{exc}",
             )
 
+        if self.settings.risk.net_edge_enabled:
+            if decision.execution_price is None:
+                return self._block_real_attempt(attempt, "net_edge_execution_price_unavailable")
+            try:
+                costs = await self.real_client.what_if_open_costs(
+                    transaction="buy" if proposal.side == Side.BUY else "sellShort",
+                    instrument_id=attempt.instrument_id,
+                    settlement_type=settlement_type,
+                    amount_usd=capital,
+                    stop_loss_rate=proposal.stop_loss,
+                    take_profit_rate=proposal.take_profit,
+                    leverage=leverage,
+                )
+                edge = evaluate_net_edge(
+                    proposal,
+                    execution_price=decision.execution_price,
+                    exposure_usd=capital * leverage,
+                    open_cost_usd=costs.total_usd,
+                    round_trip_cost_multiplier=(
+                        self.settings.risk.estimated_round_trip_cost_multiplier
+                    ),
+                    min_net_reward_risk=self.settings.risk.min_net_reward_risk,
+                    min_gross_reward_to_cost=(
+                        self.settings.risk.min_gross_reward_to_cost
+                    ),
+                )
+            except Exception as exc:
+                return self._block_real_attempt(
+                    attempt,
+                    f"net_edge_preflight:{type(exc).__name__}:{exc}",
+                )
+            self.storage.add_event(
+                "net_edge_preflight",
+                json.dumps(
+                    {
+                        "attempt_id": attempt.attempt_id,
+                        "proposal_id": proposal.proposal_id,
+                        "symbol": proposal.symbol,
+                        "capital_usd": capital,
+                        "leverage": leverage,
+                        "exposure_usd": capital * leverage,
+                        "open_cost_usd": costs.total_usd,
+                        "edge": edge.as_dict(),
+                    },
+                    default=str,
+                ),
+            )
+            if not edge.approved:
+                return self._block_real_attempt(
+                    attempt,
+                    edge.reason or "net_edge_rejected",
+                )
+
+        initial_net_risk_usd = None
+        estimated_open_cost_usd = 0.0
+        if self.settings.risk.net_edge_enabled:
+            estimated_open_cost_usd = max(0.0, costs.total_usd)
+            if proposal.stop_loss is not None and decision.execution_price is not None:
+                stop_fraction = abs(decision.execution_price - proposal.stop_loss) / decision.execution_price
+                initial_net_risk_usd = (
+                    capital * leverage * stop_fraction
+                    + estimated_open_cost_usd
+                )
+
         refreshed = attempt.model_copy(
             update={
                 "amount_usd": capital,
                 "leverage": leverage,
                 "settlement_type": settlement_type,
+                "estimated_open_cost_usd": estimated_open_cost_usd,
+                "initial_net_risk_usd": initial_net_risk_usd,
                 "updated_at": datetime.now(UTC),
             }
         )
@@ -882,6 +1013,171 @@ class AutonomousOrchestrator(Orchestrator):
             )
             return 0
         return 1
+
+    async def _process_real_exits(self, now: datetime | None = None) -> int:
+        """Evaluate managed real positions on net P&L and close only when enabled.
+
+        Every close is preceded by forced reconciliation. A transport failure is
+        never retried here because the broker outcome is ambiguous; reconciliation
+        on the next poll is the source of truth.
+        """
+        if (
+            not self.settings.risk.net_exit_enabled
+            or self.settings.execution.autonomous_mode != "real"
+            or self.real_client is None
+            or self.real_reconciliation is None
+        ):
+            return 0
+
+        await self.real_reconciliation.poll_once(force=True)
+        report = self.storage.get_reconciliation_report()
+        if report is None or not report.trading_enabled:
+            return 0
+
+        positions = self.storage.active_managed_positions()
+        actions = 0
+        for position in positions:
+            initial_risk = position.initial_net_risk_usd
+            if initial_risk is None and position.open_rate and position.stop_loss_rate:
+                exposure = position.amount_usd * (position.leverage or 1.0)
+                stop_fraction = abs(position.open_rate - position.stop_loss_rate) / position.open_rate
+                initial_risk = exposure * stop_fraction + position.estimated_open_cost_usd
+
+            # Until eToro exposes a dedicated close-cost what-if in this client,
+            # use the observed opening cost as a conservative symmetric estimate.
+            close_cost = max(0.0, position.estimated_open_cost_usd)
+            decision = evaluate_net_exit(
+                gross_pnl_usd=position.last_unrealized_pnl_usd,
+                estimated_open_cost_usd=max(0.0, position.estimated_open_cost_usd),
+                estimated_close_cost_usd=close_cost,
+                initial_net_risk_usd=initial_risk,
+                take_profit_net_r=self.settings.risk.net_exit_take_profit_r,
+                protect_profit_net_r=self.settings.risk.net_exit_protect_profit_r,
+            )
+            self.storage.add_event(
+                "net_exit_evaluation",
+                json.dumps(
+                    {
+                        "local_id": position.local_id,
+                        "broker_position_id": position.broker_position_id,
+                        "symbol": position.symbol,
+                        "decision": decision.as_dict(),
+                    },
+                    default=str,
+                ),
+            )
+
+            if decision.action == "PROTECT":
+                if position.open_rate is None or initial_risk is None or initial_risk <= 0:
+                    self.storage.add_event(
+                        "net_exit_protect_shadow",
+                        json.dumps(
+                            {
+                                "local_id": position.local_id,
+                                "broker_position_id": position.broker_position_id,
+                                "symbol": position.symbol,
+                                "approved": False,
+                                "reason": "protective_stop_inputs_unavailable",
+                            }
+                        ),
+                    )
+                    continue
+                protective = calculate_protective_stop(
+                    side=position.side,
+                    open_rate=position.open_rate,
+                    current_executable_price=(
+                        position.open_rate
+                        * (
+                            1.0
+                            + (
+                                position.last_unrealized_pnl_usd
+                                / (position.amount_usd * (position.leverage or 1.0))
+                            )
+                        )
+                        if position.side.upper() == "BUY"
+                        else position.open_rate
+                        * (
+                            1.0
+                            - (
+                                position.last_unrealized_pnl_usd
+                                / (position.amount_usd * (position.leverage or 1.0))
+                            )
+                        )
+                    ),
+                    current_stop_rate=position.stop_loss_rate,
+                    exposure_usd=position.amount_usd * (position.leverage or 1.0),
+                    estimated_open_cost_usd=max(0.0, position.estimated_open_cost_usd),
+                    estimated_close_cost_usd=close_cost,
+                    initial_net_risk_usd=initial_risk,
+                )
+                self.storage.add_event(
+                    "net_exit_protect_shadow",
+                    json.dumps(
+                        {
+                            "local_id": position.local_id,
+                            "broker_position_id": position.broker_position_id,
+                            "symbol": position.symbol,
+                            "protective_stop": protective.as_dict(),
+                        },
+                        default=str,
+                    ),
+                )
+                continue
+            if decision.action != "CLOSE":
+                continue
+            if not self.settings.risk.net_exit_real_close_enabled:
+                self.storage.add_event(
+                    "net_exit_close_shadow",
+                    json.dumps(
+                        {
+                            "local_id": position.local_id,
+                            "broker_position_id": position.broker_position_id,
+                            "symbol": position.symbol,
+                            "reason": decision.reason,
+                        }
+                    ),
+                )
+                continue
+
+            # Reconcile immediately before each broker write.
+            await self.real_reconciliation.poll_once(force=True)
+            fresh_report = self.storage.get_reconciliation_report()
+            if fresh_report is None or not fresh_report.trading_enabled:
+                break
+            try:
+                result = await self.real_client.close_position(
+                    position_id=position.broker_position_id
+                )
+            except Exception as exc:
+                self.storage.add_event(
+                    "net_exit_close_uncertain",
+                    json.dumps(
+                        {
+                            "local_id": position.local_id,
+                            "broker_position_id": position.broker_position_id,
+                            "symbol": position.symbol,
+                            "error": repr(exc),
+                        }
+                    ),
+                )
+                # Fail closed: do not issue any further broker writes this cycle.
+                break
+            self.storage.add_event(
+                "net_exit_close_submitted",
+                json.dumps(
+                    {
+                        "local_id": position.local_id,
+                        "broker_position_id": position.broker_position_id,
+                        "symbol": position.symbol,
+                        "request_id": result.request_id,
+                        "reason": decision.reason,
+                    }
+                ),
+            )
+            actions += 1
+            # Confirm through reconciliation rather than trusting the write response.
+            await self.real_reconciliation.poll_once(force=True)
+        return actions
 
     def _block_real_attempt(
         self,

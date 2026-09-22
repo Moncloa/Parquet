@@ -46,6 +46,8 @@ class ExecutionAttempt(BaseModel):
     broker_order_id: str | None = None
     broker_position_id: str | None = None
     reason: str | None = None
+    estimated_open_cost_usd: float = 0.0
+    initial_net_risk_usd: float | None = None
 
     @property
     def exposure_usd(self) -> float:

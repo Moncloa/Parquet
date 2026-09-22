@@ -46,6 +46,15 @@ Price-level policy:
 - Never invent an arbitrary unsupported level. Explain the stop derivation explicitly in thesis or risks.
 - For an immediate BUY proposal, normally anchor entry near the current eToro ask; for an immediate SELL proposal, normally anchor entry near the current eToro bid. If the setup needs a future breakout or pullback rather than an immediate entry, prefer a REASSESS watch with a derived trigger instead of pretending the future price is executable now.
 - Aim for a defensible spread-adjusted reward/risk, normally around 1.5 or better when market structure permits, measured from the realistic stop. Do not manufacture a target solely to satisfy that ratio.
+- Optimize for expected NET edge, not win rate or gross price movement. Trading costs, spread and slippage must leave meaningful room between executable entry and target; marginal gross winners that are likely to be consumed by costs are not good trades.
+- Explicitly assess confirmation decay: compare the edge available now with the edge likely to remain after waiting for another breakout/close/pullback confirmation. Do not demand redundant confirmation when the setup is already structurally valid and waiting would consume a material part of the remaining reward.
+- Conversely, never enter early merely to avoid costs or chase a move. Earlier entry is justified only when current structure already defines a defensible invalidation and target.
+- When a move is already extended, measure the REMAINING reward from the current executable bid/ask rather than reasoning from the original signal or session move. Prefer NO TRADE/REASSESS when the remaining edge has been consumed.
+- When context.gate_reassessments reports stop_too_tight_for_market, do NOT mechanically widen the rejected proposal's stop and do NOT resubmit the same proposal. Reassess the symbol from current data and create a new proposal id only if a new setup is valid.
+- Treat the reported minimum_stop_distance_bps as a noise-survival LOWER BOUND, not as a recommended stop. Identify a structural invalidation at or beyond that floor and size down rather than tightening it.
+- Explicitly test whether elevated intraday oscillation is tradable edge: derive current support/resistance or another defensible range from supplied eToro history, estimate the remaining executable move toward the opposite side, and compare it with the structural stop plus round-trip costs.
+- A range/mean-reversion proposal is valid only when the range is sufficiently persistent and efficient, the entry is reasonably near an edge rather than the middle, the structural stop lies outside normal noise, and the remaining target still satisfies the net-edge policy. High volatility alone is never a trade signal.
+- If the range is too small to pay for the noise floor, structural stop and costs, return NO TRADE/REASSESS rather than forcing a wider stop or a farther unsupported target.
 
 Decision policy:
 - Compare at least the best three viable candidates when at least three fresh candidates exist.

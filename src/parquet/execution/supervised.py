@@ -591,6 +591,8 @@ class RealSmallExecutionAdapter:
                     leverage=float(attempt.leverage),
                     stop_loss_rate=attempt.stop_loss,
                     take_profit_rate=attempt.take_profit,
+                    estimated_open_cost_usd=attempt.estimated_open_cost_usd,
+                    initial_net_risk_usd=attempt.initial_net_risk_usd,
                 )
             )
         if attempt.broker_order_id is not None:

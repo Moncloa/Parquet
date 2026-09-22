@@ -56,8 +56,8 @@ def test_autonomous_real_sizing_accepts_risk_amount_within_range() -> None:
     assert maximum == 2_500.0
 
 
-def test_autonomous_real_sizing_caps_at_configured_maximum() -> None:
-    _, _, _, amount, maximum = choose_autonomous_real_terms(
+def test_autonomous_real_sizing_uses_leverage_only_to_reach_risk_exposure() -> None:
+    leverage, _, _, capital, capital_needed = choose_autonomous_real_terms(
         _eligibility(),
         direction="LONG",
         gate_maximum_notional_usd=8_000.0,
@@ -66,8 +66,40 @@ def test_autonomous_real_sizing_caps_at_configured_maximum() -> None:
         max_leverage=2,
     )
 
-    assert amount == 5_000.0
-    assert maximum == 5_000.0
+    # x1 would expose only 5k because of the capital cap. x2 can express the
+    # full 8k risk-approved exposure using 4k capital, so x2 is selected.
+    assert leverage == 2
+    assert capital == 4_000.0
+    assert capital * leverage == 8_000.0
+    assert capital_needed == 4_000.0
+
+
+def test_autonomous_real_sizing_prefers_lowest_leverage_for_same_exposure() -> None:
+    leverage, _, _, capital, _ = choose_autonomous_real_terms(
+        _eligibility(),
+        direction="LONG",
+        gate_maximum_notional_usd=4_000.0,
+        minimum_capital_usd=1_000.0,
+        maximum_capital_usd=5_000.0,
+        max_leverage=2,
+    )
+
+    assert leverage == 1
+    assert capital == 4_000.0
+    assert capital * leverage == 4_000.0
+
+
+def test_autonomous_real_sizing_never_exceeds_risk_approved_exposure() -> None:
+    leverage, _, _, capital, _ = choose_autonomous_real_terms(
+        _eligibility(),
+        direction="LONG",
+        gate_maximum_notional_usd=3_500.0,
+        minimum_capital_usd=1_000.0,
+        maximum_capital_usd=5_000.0,
+        max_leverage=2,
+    )
+
+    assert capital * leverage <= 3_500.0 + 1e-9
 
 
 def test_autonomous_real_sizing_does_not_inflate_below_minimum() -> None:
@@ -184,3 +216,9 @@ def test_autonomous_real_rejects_excess_leverage(tmp_path) -> None:  # type: ign
     )
     with pytest.raises(RuntimeError, match="Leverage x3 exceeds autonomous real cap x2"):
         adapter._assert_supervised_allowed(_attempt(100.0, leverage=3), "")
+
+
+def test_execution_attempt_cost_basis_defaults_to_zero() -> None:
+    attempt = _attempt(1000.0)
+    assert attempt.estimated_open_cost_usd == 0.0
+    assert attempt.initial_net_risk_usd is None

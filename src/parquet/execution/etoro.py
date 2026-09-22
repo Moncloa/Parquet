@@ -507,6 +507,47 @@ class EtoroExecutionClient:
             response=body,
         )
 
+    async def close_position(
+        self,
+        *,
+        position_id: str | int,
+        request_id: str | None = None,
+    ) -> EtoroOrderResult:
+        """Close one broker position with a single, non-retried write.
+
+        Transport failures deliberately remain ambiguous: callers must reconcile
+        the portfolio before deciding whether another write is safe.
+        """
+        if not str(position_id).strip():
+            raise ValueError("position_id must be non-empty")
+        submission_request_id = request_id or str(uuid4())
+        payload: dict[str, Any] = {
+            "action": "close",
+            "positionId": str(position_id),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20, transport=self.transport) as client:
+                response = await client.post(
+                    f"{self.base_url}{self._execution_path('positions')}",
+                    headers=self._headers(submission_request_id, json_body=True),
+                    json=payload,
+                )
+        except httpx.RequestError as exc:
+            raise EtoroExecutionTransportError(repr(exc), submission_request_id) from exc
+
+        if response.is_error:
+            raise EtoroExecutionError(
+                response.status_code,
+                response.text[:1000],
+                submission_request_id,
+            )
+        body = _json_object(response, submission_request_id, "position close")
+        return EtoroOrderResult(
+            request_id=submission_request_id,
+            payload=payload,
+            response=body,
+        )
+
     async def lookup_order(
         self,
         *,
