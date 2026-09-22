@@ -216,3 +216,9 @@ def test_autonomous_real_rejects_excess_leverage(tmp_path) -> None:  # type: ign
     )
     with pytest.raises(RuntimeError, match="Leverage x3 exceeds autonomous real cap x2"):
         adapter._assert_supervised_allowed(_attempt(100.0, leverage=3), "")
+
+
+def test_execution_attempt_cost_basis_defaults_to_zero() -> None:
+    attempt = _attempt(1000.0)
+    assert attempt.estimated_open_cost_usd == 0.0
+    assert attempt.initial_net_risk_usd is None
