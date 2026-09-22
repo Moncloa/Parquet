@@ -78,6 +78,27 @@ def test_operations_dashboard_renders_core_sections() -> None:
                 ]
             },
             "watches": [],
+            "watch_history": [],
+            "watch_events": [],
+            "timeline": [
+                {
+                    "at": "2026-09-19T09:31:00+00:00",
+                    "family": "decision",
+                    "event": "REJECTED",
+                    "title": "Decisión",
+                    "symbol": "GOLD",
+                    "summary": "spread_too_wide",
+                    "detail": "p1",
+                },
+                {
+                    "at": "2026-09-19T09:30:00+00:00",
+                    "family": "review",
+                    "event": "REVIEW_COMPLETED",
+                    "title": "Revisión completada",
+                    "summary": "No trade after candidate comparison",
+                    "detail": "manual_opportunity_scan",
+                },
+            ],
             "system": {
                 "reconciliation_state": "SYNCED",
                 "identity_verified": True,
@@ -94,11 +115,47 @@ def test_operations_dashboard_renders_core_sections() -> None:
     assert "Solo análisis" in html
     assert "Operativa · REAL" in html
     assert "ALLOW EXECUTION" in html
+    assert "Timeline" in html
     assert "Reviews" in html
     assert "Decisions" in html
+    assert 'class="timeline-item decision"' in html
+    assert "REVIEW_COMPLETED" in html
     assert "GOLD" in html
     assert "spread_too_wide" in html
     assert "OIL" in html
     assert "10–50%" in html
     assert "abcdef12" in html
     assert 'class="pill real">REAL</span>' in html
+
+
+
+def test_operations_dashboard_supports_dedicated_views() -> None:
+    base = {
+        "runtime": {"execution_mode": "shadow"},
+        "controls": {
+            "providers": {},
+            "operational": {"enabled": False, "mode": "shadow"},
+            "latest_review": None,
+        },
+        "overview": {},
+        "pending_reviews": [],
+        "reviews": [{"analysis_id": "a1", "summary": "review-only", "watch": [], "trade_proposals": []}],
+        "decisions": [{"outcome": "NO_TRADE", "reasons": ["decision-only"]}],
+        "positions": {"open": [], "closed": []},
+        "watches": [],
+        "watch_history": [{"watch_id": "w1", "symbol": "OIL", "status": "EXPIRED"}],
+        "watch_events": [],
+        "timeline": [],
+        "system": {"reconciliation_state": "SYNCED"},
+    }
+
+    reviews_html = render_operations_dashboard(base, view="reviews")
+    decisions_html = render_operations_dashboard(base, view="decisions")
+    watches_html = render_operations_dashboard(base, view="watches")
+
+    assert "review-only" in reviews_html
+    assert "decision-only" not in reviews_html
+    assert "decision-only" in decisions_html
+    assert "review-only" not in decisions_html
+    assert "w1" in watches_html
+    assert 'href="/"' in reviews_html
