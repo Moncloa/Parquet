@@ -33,9 +33,9 @@ _OUTCOME_BY_KIND = {
 
 def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str, Any]:
     storage = orchestrator.storage
-    analyses = _recent_analyses(storage, limit=10)
+    analyses = _recent_analyses(storage, limit=50)
     review_requests = _recent_review_requests(storage, limit=100)
-    decisions = _recent_decisions(storage, limit=30)
+    decisions = _recent_decisions(storage, limit=100)
     decisions.extend(_no_trade_decisions(analyses, review_requests))
     decisions.sort(key=lambda item: str(item.get("at") or ""), reverse=True)
 
@@ -133,7 +133,7 @@ def build_operations_snapshot(settings: Settings, orchestrator: Any) -> dict[str
             _analysis_payload(analysis, review_requests.get(analysis.review_request_id or ""))
             for analysis in analyses
         ],
-        "decisions": decisions[:30],
+        "decisions": decisions[:100],
         "positions": {
             "open": open_positions,
             "closed": closed_positions,
