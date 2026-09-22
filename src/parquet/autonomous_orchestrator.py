@@ -15,6 +15,7 @@ from parquet.execution.demo import DemoExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
 from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.execution.net_edge import evaluate_net_edge
+from parquet.execution.net_exit import evaluate_net_exit
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.models import (
     Bias,
@@ -613,6 +614,7 @@ class AutonomousOrchestrator(Orchestrator):
         processed = await super().poll_market_once(now)
         await self._process_demo_pending(now)
         await self._process_real_pending(now)
+        await self._process_real_exits(now)
         return processed
 
     async def _process_demo_pending(self, now: datetime | None = None) -> int:
@@ -936,6 +938,115 @@ class AutonomousOrchestrator(Orchestrator):
             )
             return 0
         return 1
+
+    async def _process_real_exits(self, now: datetime | None = None) -> int:
+        """Evaluate managed real positions on net P&L and close only when enabled.
+
+        Every close is preceded by forced reconciliation. A transport failure is
+        never retried here because the broker outcome is ambiguous; reconciliation
+        on the next poll is the source of truth.
+        """
+        if (
+            not self.settings.risk.net_exit_enabled
+            or self.settings.execution.autonomous_mode != "real"
+            or self.real_client is None
+            or self.real_reconciliation is None
+        ):
+            return 0
+
+        await self.real_reconciliation.poll_once(force=True)
+        report = self.storage.get_reconciliation_report()
+        if report is None or not report.trading_enabled:
+            return 0
+
+        positions = self.storage.active_managed_positions()
+        actions = 0
+        for position in positions:
+            initial_risk = position.initial_net_risk_usd
+            if initial_risk is None and position.open_rate and position.stop_loss_rate:
+                exposure = position.amount_usd * (position.leverage or 1.0)
+                stop_fraction = abs(position.open_rate - position.stop_loss_rate) / position.open_rate
+                initial_risk = exposure * stop_fraction + position.estimated_open_cost_usd
+
+            # Until eToro exposes a dedicated close-cost what-if in this client,
+            # use the observed opening cost as a conservative symmetric estimate.
+            close_cost = max(0.0, position.estimated_open_cost_usd)
+            decision = evaluate_net_exit(
+                gross_pnl_usd=position.last_unrealized_pnl_usd,
+                estimated_open_cost_usd=max(0.0, position.estimated_open_cost_usd),
+                estimated_close_cost_usd=close_cost,
+                initial_net_risk_usd=initial_risk,
+                take_profit_net_r=self.settings.risk.net_exit_take_profit_r,
+                protect_profit_net_r=self.settings.risk.net_exit_protect_profit_r,
+            )
+            self.storage.add_event(
+                "net_exit_evaluation",
+                json.dumps(
+                    {
+                        "local_id": position.local_id,
+                        "broker_position_id": position.broker_position_id,
+                        "symbol": position.symbol,
+                        "decision": decision.as_dict(),
+                    },
+                    default=str,
+                ),
+            )
+
+            if decision.action != "CLOSE":
+                continue
+            if not self.settings.risk.net_exit_real_close_enabled:
+                self.storage.add_event(
+                    "net_exit_close_shadow",
+                    json.dumps(
+                        {
+                            "local_id": position.local_id,
+                            "broker_position_id": position.broker_position_id,
+                            "symbol": position.symbol,
+                            "reason": decision.reason,
+                        }
+                    ),
+                )
+                continue
+
+            # Reconcile immediately before each broker write.
+            await self.real_reconciliation.poll_once(force=True)
+            fresh_report = self.storage.get_reconciliation_report()
+            if fresh_report is None or not fresh_report.trading_enabled:
+                break
+            try:
+                result = await self.real_client.close_position(
+                    position_id=position.broker_position_id
+                )
+            except Exception as exc:
+                self.storage.add_event(
+                    "net_exit_close_uncertain",
+                    json.dumps(
+                        {
+                            "local_id": position.local_id,
+                            "broker_position_id": position.broker_position_id,
+                            "symbol": position.symbol,
+                            "error": repr(exc),
+                        }
+                    ),
+                )
+                # Fail closed: do not issue any further broker writes this cycle.
+                break
+            self.storage.add_event(
+                "net_exit_close_submitted",
+                json.dumps(
+                    {
+                        "local_id": position.local_id,
+                        "broker_position_id": position.broker_position_id,
+                        "symbol": position.symbol,
+                        "request_id": result.request_id,
+                        "reason": decision.reason,
+                    }
+                ),
+            )
+            actions += 1
+            # Confirm through reconciliation rather than trusting the write response.
+            await self.real_reconciliation.poll_once(force=True)
+        return actions
 
     def _block_real_attempt(
         self,
