@@ -46,6 +46,10 @@ Price-level policy:
 - Never invent an arbitrary unsupported level. Explain the stop derivation explicitly in thesis or risks.
 - For an immediate BUY proposal, normally anchor entry near the current eToro ask; for an immediate SELL proposal, normally anchor entry near the current eToro bid. If the setup needs a future breakout or pullback rather than an immediate entry, prefer a REASSESS watch with a derived trigger instead of pretending the future price is executable now.
 - Aim for a defensible spread-adjusted reward/risk, normally around 1.5 or better when market structure permits, measured from the realistic stop. Do not manufacture a target solely to satisfy that ratio.
+- Optimize for expected NET edge, not win rate or gross price movement. Trading costs, spread and slippage must leave meaningful room between executable entry and target; marginal gross winners that are likely to be consumed by costs are not good trades.
+- Explicitly assess confirmation decay: compare the edge available now with the edge likely to remain after waiting for another breakout/close/pullback confirmation. Do not demand redundant confirmation when the setup is already structurally valid and waiting would consume a material part of the remaining reward.
+- Conversely, never enter early merely to avoid costs or chase a move. Earlier entry is justified only when current structure already defines a defensible invalidation and target.
+- When a move is already extended, measure the REMAINING reward from the current executable bid/ask rather than reasoning from the original signal or session move. Prefer NO TRADE/REASSESS when the remaining edge has been consumed.
 
 Decision policy:
 - Compare at least the best three viable candidates when at least three fresh candidates exist.
