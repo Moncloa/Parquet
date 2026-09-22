@@ -529,6 +529,55 @@ class AutonomousOrchestrator(Orchestrator):
         payload["gate"] = decision.as_dict()
         if not decision.approved:
             self.storage.add_event("execution_rejected", json.dumps(payload))
+            if "stop_too_tight_for_market" in decision.reasons:
+                # This proposal's structural stop is incompatible with the current
+                # noise regime. Do not keep retrying the same immutable proposal.
+                self.storage.set_watch_status(watch.watch_id, "REASSESS_REQUIRED")
+                floor = decision.minimum_stop_distance_bps
+                stop = decision.stop_distance_bps
+                components = decision.stop_floor_components or {}
+                dominant = (
+                    max(components.items(), key=lambda item: item[1])
+                    if components
+                    else None
+                )
+                reason_payload = {
+                    "proposal_id": proposal.proposal_id,
+                    "symbol": proposal.symbol,
+                    "reason": "stop_too_tight_for_market",
+                    "stop_distance_bps": stop,
+                    "minimum_stop_distance_bps": floor,
+                    "stop_floor_components": components,
+                    "dominant_stop_floor": (
+                        None
+                        if dominant is None
+                        else {"component": dominant[0], "bps": dominant[1]}
+                    ),
+                    "instruction": (
+                        "Reassess current market regime. Treat the stop floor as a "
+                        "noise lower bound, not a target. Test whether the recent "
+                        "tradable range/oscillation can support a structural stop, "
+                        "round-trip costs and sufficient net reward/risk. Generate a "
+                        "new proposal only if the net edge survives; otherwise NO TRADE."
+                    ),
+                }
+                self.storage.set(
+                    f"gate_reassessment:{proposal.symbol.upper()}",
+                    json.dumps(reason_payload),
+                )
+                from parquet.scheduler import ScheduledReview
+
+                self.storage.schedule_review(
+                    ScheduledReview(
+                        at=observation.observed_at.astimezone(UTC),
+                        reason=f"gate_reassess:{proposal.symbol}:stop_too_tight_for_market",
+                        source="gate",
+                    )
+                )
+                self.storage.add_event(
+                    "gate_reassessment_requested",
+                    json.dumps(reason_payload),
+                )
             return
 
         if not self.settings.execution.autonomous_enabled:
