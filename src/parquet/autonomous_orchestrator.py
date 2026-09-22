@@ -1068,8 +1068,7 @@ class AutonomousOrchestrator(Orchestrator):
             )
 
             if decision.action == "PROTECT":
-                executable_price = position.last_rate
-                if executable_price is None or initial_risk is None or initial_risk <= 0:
+                if position.open_rate is None or initial_risk is None or initial_risk <= 0:
                     self.storage.add_event(
                         "net_exit_protect_shadow",
                         json.dumps(
@@ -1086,7 +1085,25 @@ class AutonomousOrchestrator(Orchestrator):
                 protective = calculate_protective_stop(
                     side=position.side,
                     open_rate=position.open_rate,
-                    current_executable_price=executable_price,
+                    current_executable_price=(
+                        position.open_rate
+                        * (
+                            1.0
+                            + (
+                                position.last_unrealized_pnl_usd
+                                / (position.amount_usd * (position.leverage or 1.0))
+                            )
+                        )
+                        if position.side.upper() == "BUY"
+                        else position.open_rate
+                        * (
+                            1.0
+                            - (
+                                position.last_unrealized_pnl_usd
+                                / (position.amount_usd * (position.leverage or 1.0))
+                            )
+                        )
+                    ),
                     current_stop_rate=position.stop_loss_rate,
                     exposure_usd=position.amount_usd * (position.leverage or 1.0),
                     estimated_open_cost_usd=max(0.0, position.estimated_open_cost_usd),
