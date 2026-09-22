@@ -14,6 +14,7 @@ from parquet.execution.autonomous import (
 from parquet.execution.demo import DemoExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
 from parquet.execution.sizing import choose_autonomous_real_terms
+from parquet.execution.net_edge import evaluate_net_edge
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.models import (
     Bias,
@@ -850,6 +851,59 @@ class AutonomousOrchestrator(Orchestrator):
                 attempt,
                 f"real_broker_preflight:{exc}",
             )
+
+        if self.settings.risk.net_edge_enabled:
+            if decision.execution_price is None:
+                return self._block_real_attempt(attempt, "net_edge_execution_price_unavailable")
+            try:
+                costs = await self.real_client.what_if_open_costs(
+                    transaction="buy" if proposal.side == Side.BUY else "sellShort",
+                    instrument_id=attempt.instrument_id,
+                    settlement_type=settlement_type,
+                    amount_usd=capital,
+                    stop_loss_rate=proposal.stop_loss,
+                    take_profit_rate=proposal.take_profit,
+                    leverage=leverage,
+                )
+                edge = evaluate_net_edge(
+                    proposal,
+                    execution_price=decision.execution_price,
+                    exposure_usd=capital * leverage,
+                    open_cost_usd=costs.total_usd,
+                    round_trip_cost_multiplier=(
+                        self.settings.risk.estimated_round_trip_cost_multiplier
+                    ),
+                    min_net_reward_risk=self.settings.risk.min_net_reward_risk,
+                    min_gross_reward_to_cost=(
+                        self.settings.risk.min_gross_reward_to_cost
+                    ),
+                )
+            except Exception as exc:
+                return self._block_real_attempt(
+                    attempt,
+                    f"net_edge_preflight:{type(exc).__name__}:{exc}",
+                )
+            self.storage.add_event(
+                "net_edge_preflight",
+                json.dumps(
+                    {
+                        "attempt_id": attempt.attempt_id,
+                        "proposal_id": proposal.proposal_id,
+                        "symbol": proposal.symbol,
+                        "capital_usd": capital,
+                        "leverage": leverage,
+                        "exposure_usd": capital * leverage,
+                        "open_cost_usd": costs.total_usd,
+                        "edge": edge.as_dict(),
+                    },
+                    default=str,
+                ),
+            )
+            if not edge.approved:
+                return self._block_real_attempt(
+                    attempt,
+                    edge.reason or "net_edge_rejected",
+                )
 
         refreshed = attempt.model_copy(
             update={
