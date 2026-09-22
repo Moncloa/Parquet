@@ -160,6 +160,12 @@ class RiskConfig(BaseModel):
     estimated_round_trip_cost_multiplier: float = Field(default=2.0, ge=1.0, le=5.0)
     min_net_reward_risk: float = Field(default=1.20, ge=0.0, le=10.0)
     min_gross_reward_to_cost: float = Field(default=3.0, ge=0.0, le=100.0)
+    # Net-P&L exit management. Automated closes are opt-in until validated in
+    # production; evaluation/journaling can be enabled independently.
+    net_exit_enabled: bool = True
+    net_exit_real_close_enabled: bool = False
+    net_exit_take_profit_r: float = Field(default=1.50, gt=0.0, le=20.0)
+    net_exit_protect_profit_r: float = Field(default=0.75, gt=0.0, le=20.0)
 
 
 class StructuralReview(BaseModel):
