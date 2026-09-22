@@ -14,7 +14,7 @@ from parquet.execution.autonomous import (
 from parquet.execution.demo import DemoExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
 from parquet.execution.net_edge import evaluate_net_edge
-from parquet.execution.net_exit import evaluate_net_exit
+from parquet.execution.net_exit import calculate_protective_stop, evaluate_net_exit
 from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.models import (
@@ -1067,6 +1067,45 @@ class AutonomousOrchestrator(Orchestrator):
                 ),
             )
 
+            if decision.action == "PROTECT":
+                executable_price = position.last_rate
+                if executable_price is None or initial_risk is None or initial_risk <= 0:
+                    self.storage.add_event(
+                        "net_exit_protect_shadow",
+                        json.dumps(
+                            {
+                                "local_id": position.local_id,
+                                "broker_position_id": position.broker_position_id,
+                                "symbol": position.symbol,
+                                "approved": False,
+                                "reason": "protective_stop_inputs_unavailable",
+                            }
+                        ),
+                    )
+                    continue
+                protective = calculate_protective_stop(
+                    side=position.side,
+                    open_rate=position.open_rate,
+                    current_executable_price=executable_price,
+                    current_stop_rate=position.stop_loss_rate,
+                    exposure_usd=position.amount_usd * (position.leverage or 1.0),
+                    estimated_open_cost_usd=max(0.0, position.estimated_open_cost_usd),
+                    estimated_close_cost_usd=close_cost,
+                    initial_net_risk_usd=initial_risk,
+                )
+                self.storage.add_event(
+                    "net_exit_protect_shadow",
+                    json.dumps(
+                        {
+                            "local_id": position.local_id,
+                            "broker_position_id": position.broker_position_id,
+                            "symbol": position.symbol,
+                            "protective_stop": protective.as_dict(),
+                        },
+                        default=str,
+                    ),
+                )
+                continue
             if decision.action != "CLOSE":
                 continue
             if not self.settings.risk.net_exit_real_close_enabled:
