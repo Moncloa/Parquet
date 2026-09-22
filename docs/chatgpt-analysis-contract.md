@@ -84,6 +84,8 @@ A `close_*` trigger should specify the timeframe when relevant.
 - Stop realism is deterministic: the proposed stop must be on the protective side of the current executable quote and no tighter than the largest applicable floor derived from configured absolute distance, spread, recent step volatility, recent 60-minute range and recent 5/15-minute movement.
 - The deterministic stop floor is a minimum-noise bound, not a recommended stop. The strategy should place the stop at genuine setup invalidation and may choose a wider level when structure requires it.
 - Position sizing is controlled by Parquet from account equity, the current executable price, the approved stop distance and configured risk limits. A wider justified stop therefore reduces position size; the strategy must never tighten the stop to obtain a larger position.
+- Autonomous real execution applies a final cost-aware net-edge preflight after broker eligibility and sizing. It queries eToro what-if opening costs, estimates round-trip cost with the configured multiplier, and rejects entries whose remaining target reward is too small relative to costs or whose net reward/risk is below threshold.
+- Net edge is measured from the fresh executable price, not the original signal price. This deliberately blocks late entries after confirmation has consumed too much of the planned move.
 - `mode=shadow` never places an order.
 - `next_review`: the strategy may request an extraordinary future review. Structural reviews remain controlled by Parquet.
 - `NO TRADE`: use empty `watch` and `trade_proposals` arrays. This is a valid and expected result.
