@@ -154,6 +154,12 @@ class RiskConfig(BaseModel):
     min_stop_recent_move_fraction: float = Field(default=0.25, ge=0, le=1)
     max_risk_snapshot_age_seconds: int = Field(default=120, ge=1, le=3600)
     allow_duplicate_symbol_positions: bool = False
+    # Cost-aware entry hurdle. The broker what-if endpoint provides opening
+    # costs; estimate a round trip conservatively until exact close costs exist.
+    net_edge_enabled: bool = True
+    estimated_round_trip_cost_multiplier: float = Field(default=2.0, ge=1.0, le=5.0)
+    min_net_reward_risk: float = Field(default=1.20, ge=0.0, le=10.0)
+    min_gross_reward_to_cost: float = Field(default=3.0, ge=0.0, le=100.0)
 
 
 class StructuralReview(BaseModel):
