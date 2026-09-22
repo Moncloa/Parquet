@@ -1,7 +1,16 @@
 from datetime import UTC, datetime, timedelta
 
 from parquet.config import ExecutionConfig, Settings
-from parquet.models import MarketAnalysis, NextReview, RiskSnapshot
+from parquet.models import (
+    Bias,
+    MarketAnalysis,
+    NextReview,
+    RiskSnapshot,
+    Trigger,
+    TriggerAction,
+    TriggerType,
+    WatchItem,
+)
 from parquet.operations import build_operations_snapshot
 from parquet.portfolio import BrokerPortfolioSnapshot, ManagedPosition
 from parquet.scheduler import ReviewQueue, ScheduledReview
@@ -28,6 +37,24 @@ def test_operations_snapshot_connects_reviews_decisions_and_positions(tmp_path) 
         next_review=NextReview(at=now + timedelta(hours=1), reason="reassess"),
     )
     storage.save_analysis(analysis.analysis_id, now.isoformat(), analysis.model_dump_json())
+    watch = WatchItem(
+        watch_id="watch-1",
+        symbol="GOLD",
+        bias=Bias.LONG,
+        trigger=Trigger(type=TriggerType.PRICE_ABOVE, price=2500.0),
+        expires_at=now + timedelta(hours=2),
+        on_trigger=TriggerAction.REASSESS,
+        rationale="wait for breakout",
+    )
+    storage.save_watch(analysis.analysis_id, watch)
+    storage.add_event(
+        "watch_event",
+        (
+            '{"watch_id":"watch-1","symbol":"GOLD","event":"TRIGGERED",'
+            '"observed_at":"2026-09-19T09:35:00Z","observed_price":2501.0,'
+            '"action":"REASSESS","reason":"price_above"}'
+        ),
+    )
     storage.add_event(
         "review_request",
         (
@@ -75,6 +102,22 @@ def test_operations_snapshot_connects_reviews_decisions_and_positions(tmp_path) 
             last_unrealized_pnl_usd=2.0,
         )
     )
+    storage.save_managed_position(
+        ManagedPosition(
+            local_id="a2",
+            broker_position_id="b2",
+            proposal_id="p-closed",
+            instrument_id=2,
+            symbol="GOLD",
+            side="SELL",
+            opened_at=now - timedelta(hours=1),
+            status="CLOSED_AT_BROKER",
+            amount_usd=200.0,
+            closed_at=now + timedelta(minutes=10),
+            realized_pnl_usd=4.0,
+            pnl_estimated=True,
+        )
+    )
     orchestrator.reviews.add(
         ScheduledReview(
             at=now + timedelta(minutes=30),
@@ -101,3 +144,11 @@ def test_operations_snapshot_connects_reviews_decisions_and_positions(tmp_path) 
     assert "REJECTED" in outcomes
     assert snapshot["positions"]["open"][0]["symbol"] == "OIL"
     assert snapshot["pending_reviews"][0]["source"] == "structural"
+    families = {item["family"] for item in snapshot["timeline"]}
+    assert {"review", "decision", "watch", "position_open", "position_close"} <= families
+    close_events = [
+        item for item in snapshot["timeline"] if item["event"] == "POSITION_CLOSED"
+    ]
+    assert close_events[0]["symbol"] == "GOLD"
+    assert snapshot["watch_history"][0]["watch_id"] == "watch-1"
+    assert snapshot["watch_events"][0]["event"] == "TRIGGERED"
