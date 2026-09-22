@@ -93,6 +93,14 @@ risk:
   max_risk_snapshot_age_seconds: 120
   allow_duplicate_symbol_positions: false
 
+  # Require enough remaining target edge to overcome estimated round-trip costs.
+  # eToro what-if opening costs are multiplied by 2 until exact close costs are
+  # available pre-trade. These thresholds apply to autonomous real execution.
+  net_edge_enabled: true
+  estimated_round_trip_cost_multiplier: 2.0
+  min_net_reward_risk: 1.20
+  min_gross_reward_to_cost: 3.0
+
 schedule:
   timezone: Europe/Madrid
   structural_reviews:
