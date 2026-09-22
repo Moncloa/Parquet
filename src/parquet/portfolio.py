@@ -100,6 +100,8 @@ class ManagedPosition(BaseModel):
     closed_at: datetime | None = None
     realized_pnl_usd: float | None = None
     pnl_estimated: bool = False
+    estimated_open_cost_usd: float = 0.0
+    initial_net_risk_usd: float | None = None
 
 
 class ManagedOrder(BaseModel):
