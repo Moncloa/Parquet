@@ -25,11 +25,13 @@ class LocalEquityRiskLedger:
     """Durable broker-equity snapshots for risk-period baselines.
 
     Historical eToro balance scope is not always available. This ledger records
-    every broker reconciliation locally and establishes a period baseline only
-    when Parquet has snapshots on both sides of the UTC boundary, both snapshots
-    are flat, and their equities agree to the cent. A manual baseline may be
-    seeded explicitly for bootstrap/recovery, but it is stored separately and
-    returned with provenance so it can never masquerade as an observed snapshot.
+    every broker reconciliation locally and establishes a period baseline from
+    snapshots bracketing the UTC boundary. When the portfolio is flat and equity
+    agrees to the cent, the baseline is exact. Otherwise, if both observations
+    are still close enough to the boundary, Parquet uses the higher observed
+    equity as a conservative upper-bound baseline so overnight positions remain
+    supported without understating losses. A manual baseline may be seeded
+    explicitly for bootstrap/recovery and is stored separately with provenance.
     """
 
     _MANUAL_MODES = {"exact", "conservative_upper_bound"}
@@ -189,29 +191,50 @@ class LocalEquityRiskLedger:
 
         before_open = int(before[2])
         after_open = int(after[2])
-        if before_open != 0 or after_open != 0:
-            raise ValueError(
-                f"cannot establish exact local {label} baseline: "
-                "portfolio was not flat across boundary"
-            )
-
         before_equity = float(before[1])
         after_equity = float(after[1])
         if before_equity <= 0 or after_equity <= 0:
             raise ValueError(f"local {label} equity baseline must be positive")
+
+        flat_exact = (
+            before_open == 0
+            and after_open == 0
+            and abs(before_equity - after_equity) <= 0.01
+        )
+        if flat_exact:
+            return EquityBoundaryBaseline(
+                boundary=boundary_utc,
+                equity_usd=after_equity,
+                before_at=before_at,
+                after_at=after_at,
+                before_gap_seconds=before_gap,
+                after_gap_seconds=after_gap,
+            )
+
+        conservative_equity = max(before_equity, after_equity)
+        reasons: list[str] = []
+        if before_open != 0 or after_open != 0:
+            reasons.append(
+                f"open_positions={before_open}->{after_open}"
+            )
         if abs(before_equity - after_equity) > 0.01:
-            raise ValueError(
-                f"cannot establish exact local {label} baseline: equity changed "
-                f"across boundary ({before_equity:.2f} -> {after_equity:.2f})"
+            reasons.append(
+                f"equity={before_equity:.2f}->{after_equity:.2f}"
             )
 
         return EquityBoundaryBaseline(
             boundary=boundary_utc,
-            equity_usd=after_equity,
+            equity_usd=conservative_equity,
             before_at=before_at,
             after_at=after_at,
             before_gap_seconds=before_gap,
             after_gap_seconds=after_gap,
+            provenance="local_bracket",
+            mode="conservative_upper_bound",
+            source=(
+                "automatic conservative boundary recovery: "
+                + ", ".join(reasons)
+            ),
         )
 
     def _manual_baseline(

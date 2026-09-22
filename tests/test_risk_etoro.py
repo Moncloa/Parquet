@@ -145,7 +145,7 @@ async def test_missing_local_boundary_baseline_fails_closed(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_open_position_across_boundary_fails_closed(tmp_path) -> None:
+async def test_open_position_across_boundary_uses_conservative_baseline(tmp_path) -> None:
     position = BrokerPosition(position_id="7", instrument_id=1)
     open_positions = [_open_position("7", "2026-09-15T12:00:00Z")]
 
@@ -153,7 +153,10 @@ async def test_open_position_across_boundary_fails_closed(tmp_path) -> None:
         if request.url.path == "/api/v1/trading/info/trade/history":
             return httpx.Response(200, json=[])
         if request.url.path == "/api/v1/trading/info/real/pnl":
-            return httpx.Response(200, json={"clientPortfolio": {"positions": open_positions, "mirrors": []}})
+            return httpx.Response(
+                200,
+                json={"clientPortfolio": {"positions": open_positions, "mirrors": []}},
+            )
         raise AssertionError(f"unexpected path {request.url.path}")
 
     storage = Storage(tmp_path / "state.db")
@@ -174,18 +177,32 @@ async def test_open_position_across_boundary_fails_closed(tmp_path) -> None:
     current = _snapshot(position, equity=9975.0)
     reader.record_equity(current)
 
-    with pytest.raises(ValueError, match="portfolio was not flat across boundary"):
-        await reader.snapshot(current, now=NOW)
+    result = await reader.snapshot(current, now=NOW)
+
+    assert result.daily_start_equity_usd == 10000.0
+    assert result.daily_pnl_usd == -25.0
+    assert result.daily_pnl_pct == pytest.approx(-0.25)
+    assert result.daily_baseline.mode == "conservative_upper_bound"
+    assert result.daily_baseline.provenance == "local_bracket"
+    assert result.daily_baseline.source is not None
+    assert "open_positions=1->1" in result.daily_baseline.source
+    assert "equity=10000.00->9999.00" in result.daily_baseline.source
 
 
-def test_boundary_equity_change_fails_closed(tmp_path) -> None:
+def test_boundary_equity_change_uses_higher_observation_conservatively(tmp_path) -> None:
     storage = Storage(tmp_path / "state.db")
     ledger = LocalEquityRiskLedger(storage)
     ledger.record(_snapshot(equity=10000.0, captured_at=DAY_START - timedelta(seconds=30)))
     ledger.record(_snapshot(equity=9999.0, captured_at=DAY_START + timedelta(seconds=30)))
 
-    with pytest.raises(ValueError, match="equity changed across boundary"):
-        ledger.baseline(DAY_START, label="daily")
+    baseline = ledger.baseline(DAY_START, label="daily")
+
+    assert baseline.equity_usd == 10000.0
+    assert baseline.mode == "conservative_upper_bound"
+    assert baseline.provenance == "local_bracket"
+    assert baseline.source == (
+        "automatic conservative boundary recovery: equity=10000.00->9999.00"
+    )
 
 
 def test_boundary_snapshots_too_far_away_fail_closed(tmp_path) -> None:
@@ -220,3 +237,38 @@ async def test_malformed_trade_history_fails_closed(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="open timestamp"):
         await reader.snapshot(_snapshot(), now=NOW)
+
+
+
+def test_flat_unchanged_boundary_remains_exact(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    ledger = LocalEquityRiskLedger(storage)
+    ledger.record(_snapshot(equity=10000.0, captured_at=DAY_START - timedelta(seconds=30)))
+    ledger.record(_snapshot(equity=10000.0, captured_at=DAY_START + timedelta(seconds=30)))
+
+    baseline = ledger.baseline(DAY_START, label="daily")
+
+    assert baseline.equity_usd == 10000.0
+    assert baseline.mode == "exact"
+    assert baseline.provenance == "local_bracket"
+    assert baseline.source is None
+
+
+def test_conservative_boundary_uses_higher_side_when_after_is_higher(tmp_path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    ledger = LocalEquityRiskLedger(storage)
+    position = BrokerPosition(position_id="overnight", instrument_id=1)
+    ledger.record(
+        _snapshot(position, equity=9998.0, captured_at=DAY_START - timedelta(seconds=20))
+    )
+    ledger.record(
+        _snapshot(position, equity=10002.0, captured_at=DAY_START + timedelta(seconds=20))
+    )
+
+    baseline = ledger.baseline(DAY_START, label="daily")
+
+    assert baseline.equity_usd == 10002.0
+    assert baseline.mode == "conservative_upper_bound"
+    assert baseline.source is not None
+    assert "open_positions=1->1" in baseline.source
+    assert "equity=9998.00->10002.00" in baseline.source
