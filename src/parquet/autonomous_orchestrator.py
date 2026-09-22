@@ -13,9 +13,9 @@ from parquet.execution.autonomous import (
 )
 from parquet.execution.demo import DemoExecutionAdapter
 from parquet.execution.etoro import EtoroExecutionClient
-from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.execution.net_edge import evaluate_net_edge
 from parquet.execution.net_exit import evaluate_net_exit
+from parquet.execution.sizing import choose_autonomous_real_terms
 from parquet.execution.supervised import RealSmallExecutionAdapter
 from parquet.models import (
     Bias,
