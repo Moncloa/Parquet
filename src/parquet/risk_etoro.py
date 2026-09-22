@@ -49,9 +49,10 @@ class EtoroRiskReader:
 
     eToro trading scopes provide current real equity/PnL and trade history, but a
     separate balance scope may be unavailable. Parquet therefore records its own
-    broker-equity snapshots. Daily/weekly baselines are accepted only when local
-    snapshots bracket the UTC boundary closely, the portfolio is flat on both
-    sides, and equity is unchanged to the cent. Any ambiguity fails closed.
+    broker-equity snapshots. Daily/weekly baselines use closely bracketing local
+    snapshots: flat unchanged boundaries are exact, while overnight positions or
+    boundary equity movement use the higher observed equity as a conservative
+    upper bound. Missing or stale boundary observations still fail closed.
     """
 
     def __init__(
