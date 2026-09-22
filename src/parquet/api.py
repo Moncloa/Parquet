@@ -16,7 +16,7 @@ from parquet.controls import (
     execute_manual_review,
     manual_review_status,
 )
-from parquet.dashboard import position_payload, render_positions_dashboard
+from parquet.dashboard import position_payload
 from parquet.operations import build_operations_snapshot
 from parquet.operations_dashboard import render_operations_dashboard
 from parquet.orchestrator import Orchestrator
@@ -120,9 +120,30 @@ def create_app(settings: Settings, orchestrator: Orchestrator) -> FastAPI:
             request_id,
         )
 
+    @app.get("/reviews", response_class=HTMLResponse)
+    def reviews_page() -> HTMLResponse:
+        snapshot = build_operations_snapshot(settings, orchestrator)
+        return HTMLResponse(render_operations_dashboard(snapshot, view="reviews"))
+
+    @app.get("/decisions", response_class=HTMLResponse)
+    def decisions_page() -> HTMLResponse:
+        snapshot = build_operations_snapshot(settings, orchestrator)
+        return HTMLResponse(render_operations_dashboard(snapshot, view="decisions"))
+
+    @app.get("/watches", response_class=HTMLResponse)
+    def watches_page() -> HTMLResponse:
+        snapshot = build_operations_snapshot(settings, orchestrator)
+        return HTMLResponse(render_operations_dashboard(snapshot, view="watches"))
+
     @app.get("/positions", response_class=HTMLResponse)
     def positions_page() -> HTMLResponse:
-        return HTMLResponse(render_positions_dashboard(orchestrator.storage.managed_positions()))
+        snapshot = build_operations_snapshot(settings, orchestrator)
+        return HTMLResponse(render_operations_dashboard(snapshot, view="positions"))
+
+    @app.get("/system", response_class=HTMLResponse)
+    def system_page() -> HTMLResponse:
+        snapshot = build_operations_snapshot(settings, orchestrator)
+        return HTMLResponse(render_operations_dashboard(snapshot, view="system"))
 
     @app.get("/positions.json")
     def positions_data() -> dict[str, object]:
